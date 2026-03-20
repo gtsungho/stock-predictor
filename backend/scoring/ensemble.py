@@ -6,15 +6,38 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from analysis.market_events import analyze_market_events
 
 
-# 각 분석 모듈 가중치 (합계 = 1.0)
-WEIGHTS = {
+# 각 분석 모듈 기본 가중치 (합계 = 1.0)
+DEFAULT_WEIGHTS = {
     'technical': 0.25,    # 기술적 분석
     'momentum': 0.25,     # 모멘텀 분석
     'fundamental': 0.20,  # 펀더멘털 분석
     'ml': 0.30,           # 머신러닝 예측
 }
+
+
+def _get_dynamic_weights(technical_result: dict) -> dict:
+    """
+    ADX 기반 동적 가중치 조정
+    - ADX > 25 (추세장): 기술적 분석 가중치 상향, 펀더멘털 하향
+    - ADX < 20 (횡보장): 펀더멘털 가중치 상향, 기술적 하향
+    """
+    weights = DEFAULT_WEIGHTS.copy()
+    adx = technical_result.get('details', {}).get('ADX', None)
+
+    if adx is not None and isinstance(adx, (int, float)):
+        if adx > 25:
+            # 추세장: 기술적 +0.05, 펀더멘털 -0.05
+            weights['technical'] = 0.30
+            weights['fundamental'] = 0.15
+        elif adx < 20:
+            # 횡보장: 펀더멘털 +0.05, 기술적 -0.05
+            weights['technical'] = 0.20
+            weights['fundamental'] = 0.25
+
+    return weights
 
 
 def calculate_ensemble_score(
@@ -32,20 +55,31 @@ def calculate_ensemble_score(
         'ml': ml_result.get('score', 0),
     }
 
-    # 가중 평균 점수
-    final_score = sum(scores[k] * WEIGHTS[k] for k in WEIGHTS)
+    # ADX 기반 동적 가중치
+    weights = _get_dynamic_weights(technical_result)
 
-    # 보너스/페널티
+    # 가중 평균 점수
+    final_score = sum(scores[k] * weights[k] for k in weights)
+
+    # 보너스/페널티 (모순 수정: 20 미만이 있으면 페널티만 적용)
     bonus = 0
-    high_scores = sum(1 for s in scores.values() if s >= 60)
-    if high_scores >= 3:
-        bonus += 10
-    elif high_scores >= 2:
-        bonus += 5
-    if all(s >= 50 for s in scores.values()):
-        bonus += 5
     if any(s < 20 for s in scores.values()):
-        bonus -= 5
+        # 극단적 저점수가 있으면 페널티만, 다른 보너스 스킵
+        bonus = -5
+    else:
+        # 모든 점수가 20 이상일 때만 보너스 적용
+        high_scores = sum(1 for s in scores.values() if s >= 60)
+        if high_scores >= 3:
+            bonus += 10
+        elif high_scores >= 2:
+            bonus += 5
+        if all(s >= 50 for s in scores.values()):
+            bonus += 5
+
+    # === 시장 이벤트 반영 ===
+    market_events = analyze_market_events(info)
+    bonus += market_events['score_adjustment']
+    event_signals = market_events.get('signals', [])
 
     final_score = max(0, min(100, final_score + bonus))
 
@@ -56,6 +90,7 @@ def calculate_ensemble_score(
     all_signals = []
     for result in [technical_result, momentum_result, fundamental_result, ml_result]:
         all_signals.extend(result.get('signals', []))
+    all_signals.extend(event_signals)
     top_signals = all_signals[:8]
 
     risk_level = assess_risk(scores, df, info)
@@ -96,11 +131,13 @@ def calculate_ensemble_score(
         'rise_probability_1d': round(prob_1d, 1),
         'rise_probability_5d': round(prob_5d, 1),
         'scores': scores,
+        'weights_used': weights,
         'top_signals': top_signals,
         'risk_level': risk_level,
         'stock_info': stock_info,
         'price_info': price_info,
         'trade_plan': trade_plan,
+        'market_events': market_events.get('events', {}),
         'details': details,
         'analyzed_at': datetime.now().isoformat(),
     }
@@ -137,13 +174,29 @@ def calculate_trade_plan(
     atr_14 = tr.tail(14).mean()
     atr_pct = (atr_14 / current_price) * 100  # ATR을 %로
 
+    # 시장 이벤트 변동성 반영
+    market_events = analyze_market_events(info)
+    vol_multiplier = market_events.get('volatility_multiplier', 1.0)
+    atr_pct *= vol_multiplier
+
     # 최근 20일 변동성
     daily_vol = df['Close'].pct_change().tail(20).std() * 100
 
-    # === 지지선/저항선 계산 ===
+    # === 지지선/저항선 계산 (None/NaN 방어) ===
     recent = df.tail(60)
-    support = recent['Low'].rolling(5).min().dropna().tail(10).median()
-    resistance = recent['High'].rolling(5).max().dropna().tail(10).median()
+    support_raw = recent['Low'].rolling(5).min().dropna().tail(10).median()
+    resistance_raw = recent['High'].rolling(5).max().dropna().tail(10).median()
+
+    # None/NaN 체크: 유효하지 않으면 현재가 기반 대체값 사용
+    try:
+        support = float(support_raw) if support_raw is not None and not pd.isna(support_raw) else current_price * 0.95
+    except (TypeError, ValueError):
+        support = current_price * 0.95
+
+    try:
+        resistance = float(resistance_raw) if resistance_raw is not None and not pd.isna(resistance_raw) else current_price * 1.05
+    except (TypeError, ValueError):
+        resistance = current_price * 1.05
 
     # 52주 고/저
     high_52w = df['High'].max()
@@ -173,7 +226,8 @@ def calculate_trade_plan(
     # 저항선 고려 (저항선이 가까우면 목표가 낮춤)
     resistance_dist_pct = ((resistance - current_price) / current_price) * 100
     if resistance_dist_pct > 0 and resistance_dist_pct < target_pct_5d:
-        target_pct_5d = max(target_pct_5d * 0.7, resistance_dist_pct * 0.9)
+        # 저항선 근처에서 목표가 조정하되, 최소 1.5% 보장
+        target_pct_5d = max(1.5, target_pct_5d * 0.7, resistance_dist_pct * 0.9)
 
     # 애널리스트 목표가 참고
     analyst_target = None
@@ -181,7 +235,6 @@ def calculate_trade_plan(
         at = info.get('targetMeanPrice')
         if at and isinstance(at, (int, float)) and at > current_price:
             analyst_target = round(at, 2)
-            analyst_upside = ((at - current_price) / current_price) * 100
 
     target_price_1d = round(current_price * (1 + target_pct_1d / 100), 2)
     target_price_5d = round(current_price * (1 + target_pct_5d / 100), 2)
@@ -251,6 +304,8 @@ def calculate_trade_plan(
         'analyst_target': analyst_target,
         'support': round(support, 2),
         'resistance': round(resistance, 2),
+        'high_52w': round(float(high_52w), 2),
+        'low_52w': round(float(low_52w), 2),
     }
 
 
@@ -270,26 +325,82 @@ def calculate_grade(score: float) -> str:
 
 
 def estimate_probability(final_score: float, ml_result: dict, horizon: str) -> float:
+    """
+    보정된 확률 추정
+    - ML 모델 정확도가 높으면(>55%) ML 확률에 가중치 0.7
+    - ML 모델 정확도가 낮으면(<=55%) final_score에 가중치 0.6
+    """
     ml_prob = ml_result.get('details', {}).get(f'ML_{horizon}_prob', 50)
-    estimated = ml_prob * 0.6 + final_score * 0.4
+    ml_accuracy = ml_result.get('details', {}).get('ML_accuracy', 50)
+
+    if isinstance(ml_accuracy, (int, float)) and ml_accuracy > 55:
+        # ML 모델 신뢰도 높음: ML 확률 가중치 0.7
+        estimated = ml_prob * 0.7 + final_score * 0.3
+    else:
+        # ML 모델 신뢰도 낮음: final_score 가중치 0.6
+        estimated = final_score * 0.6 + ml_prob * 0.4
+
     return max(15, min(90, estimated))
 
 
 def assess_risk(scores: dict, df: pd.DataFrame = None, info: dict = None) -> str:
+    """
+    리스크 평가 (확장된 팩터)
+    - 점수 분산도
+    - 펀더멘털 저점수
+    - 변동성
+    - 시가총액
+    - 52주 고가 근접 여부 (모멘텀 리스크 감소)
+    - 부채비율 (debt-to-equity)
+    """
     risk_factors = 0
+
+    # 1. 점수 분산이 크면 리스크
     score_values = list(scores.values())
     if np.std(score_values) > 25:
         risk_factors += 1
+
+    # 2. 펀더멘털 저점수
     if scores.get('fundamental', 0) < 30:
         risk_factors += 1
+
+    # 3. 최근 변동성
     if df is not None and len(df) >= 20:
         vol = df['Close'].pct_change().tail(20).std()
         if vol > 0.05:
             risk_factors += 1
+
+    # 4. 소형주 리스크
     if info:
         mcap = info.get('marketCap', 0)
         if isinstance(mcap, (int, float)) and 0 < mcap < 1e9:
             risk_factors += 1
+
+    # 5. 52주 고가 근접 여부 (모멘텀: 고가 근처면 리스크 감소)
+    if df is not None and len(df) >= 20:
+        current_price = df.iloc[-1]['Close']
+        high_52w = df['High'].max()
+        if high_52w > 0:
+            pct_from_high = (high_52w - current_price) / high_52w * 100
+            if pct_from_high < 5:
+                # 52주 고가 5% 이내: 모멘텀 강함 -> 리스크 감소
+                risk_factors -= 1
+
+    # 6. 부채비율 (debt-to-equity) 체크
+    if info:
+        de_ratio = info.get('debtToEquity')
+        if de_ratio is not None and isinstance(de_ratio, (int, float)):
+            if de_ratio > 200:
+                # 부채비율 200% 초과: 높은 재무 리스크
+                risk_factors += 1
+
+    # 7. 시장 이벤트 리스크
+    market_events = analyze_market_events(info)
+    risk_factors += market_events.get('risk_adjustment', 0)
+
+    # 최소 0으로 클램프
+    risk_factors = max(0, risk_factors)
+
     if risk_factors >= 3:
         return '높음'
     elif risk_factors >= 2:
@@ -299,13 +410,35 @@ def assess_risk(scores: dict, df: pd.DataFrame = None, info: dict = None) -> str
 
 
 def generate_recommendation(grade: str, prob_1d: float, prob_5d: float, risk: str) -> str:
+    max_prob = max(prob_1d, prob_5d)
+    prob_gap = abs(prob_1d - prob_5d)
+
+    # 1일/5일 확률 차이가 40% 이상이면 신뢰도 경고 추가
+    gap_warning = ""
+    if prob_gap >= 40:
+        gap_warning = " (단기/중기 괴리 주의)"
+
+    # 확률이 높으면 등급과 무관하게 추천 상향
+    if max_prob >= 75:
+        if prob_5d >= 75:
+            return f'매수 추천 - 5일 상승 확률 {prob_5d:.0f}%{gap_warning}'
+        else:
+            return f'단타 매수 - 1일 상승 확률 {prob_1d:.0f}%{gap_warning}'
+
+    if max_prob >= 65:
+        if grade in ('S', 'A'):
+            return f'강력 매수 - 점수+확률 모두 양호{gap_warning}'
+        else:
+            return f'매수 고려 - 상승 확률 {max_prob:.0f}%{gap_warning}'
+
+    # 기존 등급 기반 추천
     if grade == 'S':
         return '강력 매수 - 즉시 진입 추천'
     elif grade == 'A':
         if risk == '낮음':
             return '매수 추천 - 안정적 상승 기대'
         else:
-            return '매수 고려 - 상승 가능성 높으나 리스크 존재'
+            return '매수 고려 - 리스크 존재'
     elif grade == 'B':
         if prob_5d > 60:
             return '매수 고려 - 단기 상승 가능성'
@@ -316,7 +449,9 @@ def generate_recommendation(grade: str, prob_1d: float, prob_5d: float, risk: st
     elif grade == 'D':
         return '매수 보류 - 하락 리스크'
     else:
-        return '매수 금지 - 부정적 시그널'
+        if max_prob >= 50:
+            return f'관망 - 점수 낮으나 확률 {max_prob:.0f}%'
+        return '매수 비추천 - 부정적 시그널'
 
 
 def rank_stocks(results: list) -> list:

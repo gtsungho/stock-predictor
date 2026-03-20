@@ -22,6 +22,20 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from engine import analyze_single_stock, run_full_analysis, get_latest_results
+import math
+
+
+def sanitize_for_json(obj):
+    """NaN, Infinity 등 JSON 비호환 float 값을 None으로 치환"""
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_for_json(v) for v in obj]
+    elif isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    return obj
 
 # 인증 설정
 APP_PASSWORD_HASH = hashlib.sha256("aa758800".encode()).hexdigest()
@@ -149,7 +163,7 @@ async def get_results(request: Request):
         return JSONResponse(status_code=401, content={"message": "인증 필요"})
     results = get_latest_results()
     if results:
-        return results
+        return sanitize_for_json(results)
     return JSONResponse(
         status_code=404,
         content={"message": "아직 분석 결과가 없습니다. 분석을 실행해주세요."}
@@ -195,7 +209,9 @@ async def get_stock_detail(request: Request, ticker: str):
         return JSONResponse(status_code=401, content={"message": "인증 필요"})
     result = analyze_single_stock(ticker.upper())
     if result:
-        return result
+        from data.fetcher import get_usd_krw_rate
+        result['usd_krw'] = get_usd_krw_rate()
+        return sanitize_for_json(result)
     return JSONResponse(
         status_code=404,
         content={"message": f"{ticker} 분석 실패"}

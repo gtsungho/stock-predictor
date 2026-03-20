@@ -6,8 +6,9 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score
+from sklearn.preprocessing import RobustScaler
+from sklearn.metrics import accuracy_score, f1_score
+from sklearn.utils.class_weight import compute_sample_weight
 import warnings
 import joblib
 from pathlib import Path
@@ -95,16 +96,22 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     feat['atr_14'] = tr.rolling(14).mean() / close
     feat['atr_ratio'] = tr / tr.rolling(20).mean().replace(0, np.nan)
 
-    # === 모멘텀 가속도 ===
+    # === 모멘텀 가속도 (Fix: 괄호 추가) ===
     ret_5 = close.pct_change(5)
     ret_10 = close.pct_change(10)
-    feat['momentum_accel'] = ret_5 - ret_10 / 2
+    feat['momentum_accel'] = (ret_5 - ret_10) / 2
 
     # === 요일 (원-핫 안 하고 sin/cos 인코딩) ===
     if hasattr(df.index, 'dayofweek'):
         dow = df.index.dayofweek
         feat['day_sin'] = np.sin(2 * np.pi * dow / 5)
         feat['day_cos'] = np.cos(2 * np.pi * dow / 5)
+
+    # === 상대 강도 (자체 장기 추세 대비 단기 수익률) ===
+    # 종목의 20일 평균 수익률 대비 최근 5일 수익률로 상대 강도 측정
+    long_term_avg_return = close.pct_change(1).rolling(60).mean()
+    short_term_return = close.pct_change(5) / 5  # 일평균 수익률로 변환
+    feat['relative_strength'] = (short_term_return - long_term_avg_return) / close.pct_change(1).rolling(60).std().replace(0, np.nan)
 
     return feat
 
@@ -146,11 +153,12 @@ def train_model(df: pd.DataFrame, horizon: int = 5) -> dict:
         if len(y_train.unique()) < 2 or len(y_test) < 10:
             continue
 
-        scaler = StandardScaler()
+        # RobustScaler: 이상치에 더 강건한 스케일링
+        scaler = RobustScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
 
-        # Random Forest
+        # Random Forest (class_weight='balanced' 지원)
         rf = RandomForestClassifier(
             n_estimators=100,
             max_depth=6,
@@ -161,7 +169,7 @@ def train_model(df: pd.DataFrame, horizon: int = 5) -> dict:
         )
         rf.fit(X_train_scaled, y_train)
 
-        # Gradient Boosting
+        # Gradient Boosting (class_weight 미지원 -> sample_weight 사용)
         gb = GradientBoostingClassifier(
             n_estimators=100,
             max_depth=4,
@@ -169,13 +177,16 @@ def train_model(df: pd.DataFrame, horizon: int = 5) -> dict:
             learning_rate=0.05,
             random_state=42,
         )
-        gb.fit(X_train_scaled, y_train)
+        sample_weights = compute_sample_weight('balanced', y_train)
+        gb.fit(X_train_scaled, y_train, sample_weight=sample_weights)
 
-        # 테스트 정확도
+        # 테스트 평가: 정확도 + F1-score
         rf_pred = rf.predict(X_test_scaled)
         gb_pred = gb.predict(X_test_scaled)
         rf_acc = accuracy_score(y_test, rf_pred)
         gb_acc = accuracy_score(y_test, gb_pred)
+        rf_f1 = f1_score(y_test, rf_pred, zero_division=0)
+        gb_f1 = f1_score(y_test, gb_pred, zero_division=0)
 
         models[name] = {
             'rf': rf,
@@ -184,6 +195,8 @@ def train_model(df: pd.DataFrame, horizon: int = 5) -> dict:
             'feature_names': list(X.columns),
             'rf_accuracy': rf_acc,
             'gb_accuracy': gb_acc,
+            'rf_f1': rf_f1,
+            'gb_f1': gb_f1,
             'train_size': len(X_train),
             'positive_rate': y_train.mean(),
         }
@@ -216,8 +229,9 @@ def predict_stock(df: pd.DataFrame, models: dict = None) -> dict:
             feat_names = model_data['feature_names']
             X = last_features[feat_names]
 
+            # forward fill 후 남은 결측치만 0으로 대체
             if X.isna().any(axis=1).iloc[0]:
-                X = X.fillna(0)
+                X = X.ffill(axis=1).fillna(0)
 
             X_scaled = model_data['scaler'].transform(X)
 
@@ -238,6 +252,8 @@ def predict_stock(df: pd.DataFrame, models: dict = None) -> dict:
             details[f'ML_{horizon_name}_prob'] = round(ensemble_prob * 100, 1)
             details[f'ML_{horizon_name}_rf_acc'] = round(model_data['rf_accuracy'] * 100, 1)
             details[f'ML_{horizon_name}_gb_acc'] = round(model_data['gb_accuracy'] * 100, 1)
+            details[f'ML_{horizon_name}_rf_f1'] = round(model_data.get('rf_f1', 0) * 100, 1)
+            details[f'ML_{horizon_name}_gb_f1'] = round(model_data.get('gb_f1', 0) * 100, 1)
 
             # 점수 계산
             if ensemble_prob > 0.7:
@@ -258,8 +274,8 @@ def predict_stock(df: pd.DataFrame, models: dict = None) -> dict:
         except Exception as e:
             signals.append(f"ML {horizon_name} 예측 오류: {str(e)[:50]}")
 
-    # 정규화 (0-100, 두 horizon 합산 최대 50)
-    normalized_score = min(100, score * 2)
+    # 정규화 (0-100, 두 horizon 합산 최대 50이므로 비율로 계산)
+    normalized_score = max(0, min(100, (score / 50) * 100))
 
     return {
         'score': round(normalized_score, 2),

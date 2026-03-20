@@ -5,6 +5,12 @@
 import pandas as pd
 import numpy as np
 
+try:
+    import ta
+    HAS_TA = True
+except ImportError:
+    HAS_TA = False
+
 
 def analyze_momentum(df: pd.DataFrame) -> dict:
     """모멘텀 기반 종합 분석"""
@@ -47,6 +53,18 @@ def analyze_momentum(df: pd.DataFrame) -> dict:
     squeeze = analyze_volatility_squeeze(df)
     score += squeeze['score']
     signals.extend(squeeze['signals'])
+
+    # === Accumulation/Distribution 분석 (만점 10) ===
+    ad_analysis = analyze_accumulation_distribution(df)
+    score += ad_analysis['score']
+    signals.extend(ad_analysis['signals'])
+    details.update(ad_analysis['details'])
+
+    # === 다이버전스 분석 (만점 10) ===
+    div_analysis = analyze_divergence(df)
+    score += div_analysis['score']
+    signals.extend(div_analysis['signals'])
+    details.update(div_analysis['details'])
 
     # 정규화 (0-100)
     normalized_score = max(0, min(100, score))
@@ -100,6 +118,55 @@ def analyze_price_momentum(df: pd.DataFrame) -> dict:
     return {'score': min(score, 20), 'signals': signals, 'details': details}
 
 
+def _get_adaptive_volume_thresholds(df: pd.DataFrame) -> dict:
+    """종목 자체 거래량 히스토리 기반으로 적응형 임계값 계산"""
+    vol = df['Volume']
+    if len(vol) < 60:
+        # 데이터 부족 시 고정 임계값 사용
+        avg_vol_20 = vol.tail(20).mean()
+        return {
+            'extreme': 3.0 * avg_vol_20,
+            'high': 2.0 * avg_vol_20,
+            'moderate': 1.5 * avg_vol_20,
+            'avg_vol_20': avg_vol_20,
+        }
+
+    avg_vol_20 = vol.tail(20).mean()
+    if avg_vol_20 == 0:
+        return {
+            'extreme': 0, 'high': 0, 'moderate': 0, 'avg_vol_20': 0,
+        }
+
+    # 일별 거래량 비율 계산 (각 날의 거래량 / 직전 20일 평균)
+    rolling_avg = vol.rolling(20).mean()
+    vol_ratios = (vol / rolling_avg).dropna()
+
+    if len(vol_ratios) < 20:
+        return {
+            'extreme': 3.0 * avg_vol_20,
+            'high': 2.0 * avg_vol_20,
+            'moderate': 1.5 * avg_vol_20,
+            'avg_vol_20': avg_vol_20,
+        }
+
+    # 퍼센타일 기반 임계값: 변동성 큰 종목은 높은 임계값, 안정적 종목은 낮은 임계값
+    extreme_threshold = vol_ratios.quantile(0.95)   # 상위 5% → 극단적 급증
+    high_threshold = vol_ratios.quantile(0.85)      # 상위 15% → 높은 급증
+    moderate_threshold = vol_ratios.quantile(0.70)   # 상위 30% → 적당한 증가
+
+    # 최소 임계값 보장
+    extreme_threshold = max(extreme_threshold, 2.0)
+    high_threshold = max(high_threshold, 1.5)
+    moderate_threshold = max(moderate_threshold, 1.2)
+
+    return {
+        'extreme': extreme_threshold,
+        'high': high_threshold,
+        'moderate': moderate_threshold,
+        'avg_vol_20': avg_vol_20,
+    }
+
+
 def analyze_volume(df: pd.DataFrame) -> dict:
     """거래량 분석"""
     score = 0
@@ -107,9 +174,12 @@ def analyze_volume(df: pd.DataFrame) -> dict:
     details = {}
 
     last = df.iloc[-1]
-    avg_vol_20 = df['Volume'].tail(20).mean()
     avg_vol_5 = df['Volume'].tail(5).mean()
     last_vol = last['Volume']
+
+    # 적응형 임계값 계산
+    thresholds = _get_adaptive_volume_thresholds(df)
+    avg_vol_20 = thresholds['avg_vol_20']
 
     if avg_vol_20 == 0:
         return {'score': 0, 'signals': [], 'details': {}}
@@ -117,17 +187,20 @@ def analyze_volume(df: pd.DataFrame) -> dict:
     vol_ratio = last_vol / avg_vol_20
     details['Volume_Ratio_20D'] = round(vol_ratio, 2)
     details['Avg_Volume_20D'] = int(avg_vol_20)
+    details['Vol_Threshold_Extreme'] = round(thresholds['extreme'], 2)
+    details['Vol_Threshold_High'] = round(thresholds['high'], 2)
+    details['Vol_Threshold_Moderate'] = round(thresholds['moderate'], 2)
 
-    # 거래량 급증 + 양봉 = 강한 매수 시그널
+    # 거래량 급증 + 양봉 = 강한 매수 시그널 (적응형 임계값 사용)
     is_bullish = last['Close'] > last['Open']
 
-    if vol_ratio > 3.0 and is_bullish:
+    if vol_ratio > thresholds['extreme'] and is_bullish:
         score += 15
-        signals.append(f"거래량 폭발 (평균 대비 {vol_ratio:.1f}배) + 양봉")
-    elif vol_ratio > 2.0 and is_bullish:
+        signals.append(f"거래량 폭발 (평균 대비 {vol_ratio:.1f}배, 상위5% 초과) + 양봉")
+    elif vol_ratio > thresholds['high'] and is_bullish:
         score += 12
-        signals.append(f"거래량 급증 ({vol_ratio:.1f}배) + 양봉")
-    elif vol_ratio > 1.5 and is_bullish:
+        signals.append(f"거래량 급증 ({vol_ratio:.1f}배, 상위15% 초과) + 양봉")
+    elif vol_ratio > thresholds['moderate'] and is_bullish:
         score += 8
         signals.append(f"거래량 증가 ({vol_ratio:.1f}배)")
 
@@ -136,14 +209,161 @@ def analyze_volume(df: pd.DataFrame) -> dict:
         score += 5
         signals.append("최근 5일 거래량 증가 추세")
 
-    # OBV 트렌드 (On-Balance Volume)
+    # OBV 트렌드 (On-Balance Volume) - 기울기 기반 분석
     obv = (np.sign(df['Close'].diff()) * df['Volume']).cumsum()
     obv_sma = obv.rolling(10).mean()
-    if len(obv_sma.dropna()) >= 1 and obv.iloc[-1] > obv_sma.iloc[-1]:
-        score += 5
-        signals.append("OBV 상승 추세 (매수세 우위)")
+
+    if len(obv.dropna()) >= 10:
+        # OBV 기울기 분석: 최근 10일간의 OBV 추세 방향
+        obv_recent = obv.tail(10).values
+        x = np.arange(len(obv_recent))
+        obv_slope = np.polyfit(x, obv_recent, 1)[0]
+
+        # 기울기를 OBV 평균값 대비 퍼센트로 정규화
+        obv_mean = np.abs(obv_recent).mean()
+        if obv_mean > 0:
+            obv_slope_pct = (obv_slope / obv_mean) * 100
+        else:
+            obv_slope_pct = 0
+
+        details['OBV_Slope_Pct'] = round(obv_slope_pct, 2)
+
+        if obv_slope_pct > 5:
+            score += 5
+            signals.append(f"OBV 강한 상승 기울기 (매수세 강화, {obv_slope_pct:.1f}%)")
+        elif obv_slope_pct > 1:
+            score += 3
+            signals.append("OBV 완만한 상승 추세 (매수세 우위)")
+        elif obv_slope_pct < -5:
+            score -= 3
+            signals.append(f"OBV 하락 기울기 (매도세 강화, {obv_slope_pct:.1f}%)")
+    else:
+        # 데이터 부족 시 기존 SMA 비교 방식
+        if len(obv_sma.dropna()) >= 1 and obv.iloc[-1] > obv_sma.iloc[-1]:
+            score += 5
+            signals.append("OBV 상승 추세 (매수세 우위)")
 
     return {'score': min(score, 25), 'signals': signals, 'details': details}
+
+
+def analyze_divergence(df: pd.DataFrame) -> dict:
+    """가격 vs OBV 다이버전스 분석"""
+    score = 0
+    signals = []
+    details = {}
+
+    if len(df) < 30:
+        return {'score': 0, 'signals': [], 'details': {}}
+
+    # OBV 계산
+    obv = (np.sign(df['Close'].diff()) * df['Volume']).cumsum()
+
+    close = df['Close']
+
+    # 최근 구간을 두 구간으로 나눠 비교 (10일 전 구간 vs 최근 구간)
+    # 구간1: -20 ~ -10, 구간2: -10 ~ 현재
+    period1_close = close.iloc[-20:-10]
+    period2_close = close.iloc[-10:]
+    period1_obv = obv.iloc[-20:-10]
+    period2_obv = obv.iloc[-10:]
+
+    # 각 구간의 고점/저점
+    price_high1 = period1_close.max()
+    price_high2 = period2_close.max()
+    price_low1 = period1_close.min()
+    price_low2 = period2_close.min()
+
+    obv_high1 = period1_obv.max()
+    obv_high2 = period2_obv.max()
+    obv_low1 = period1_obv.min()
+    obv_low2 = period2_obv.min()
+
+    divergence_type = 'none'
+
+    # 베어리시 다이버전스: 가격 고점 상승 but OBV 고점 하락
+    if price_high2 > price_high1 and obv_high2 < obv_high1:
+        divergence_type = 'bearish'
+        score -= 5
+        signals.append("베어리시 다이버전스 (가격 신고점 but OBV 하락) - 상승 약화 경고")
+
+    # 불리시 다이버전스: 가격 저점 하락 but OBV 저점 상승
+    if price_low2 < price_low1 and obv_low2 > obv_low1:
+        divergence_type = 'bullish'
+        score += 10
+        signals.append("불리시 다이버전스 (가격 신저점 but OBV 상승) - 반등 기대")
+
+    details['Divergence'] = divergence_type
+
+    return {'score': score, 'signals': signals, 'details': details}
+
+
+def analyze_accumulation_distribution(df: pd.DataFrame) -> dict:
+    """Accumulation/Distribution Line 분석"""
+    score = 0
+    signals = []
+    details = {}
+
+    if len(df) < 20:
+        return {'score': 0, 'signals': [], 'details': {}}
+
+    if HAS_TA:
+        # ta 라이브러리 사용
+        ad_line = ta.volume.AccDistIndexIndicator(
+            high=df['High'], low=df['Low'],
+            close=df['Close'], volume=df['Volume']
+        ).acc_dist_index()
+    else:
+        # 수동 계산: AD = cumsum(CLV * Volume)
+        # CLV (Close Location Value) = ((Close - Low) - (High - Close)) / (High - Low)
+        high_low = df['High'] - df['Low']
+        # 0으로 나누기 방지
+        high_low = high_low.replace(0, np.nan)
+        clv = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / high_low
+        clv = clv.fillna(0)
+        ad_line = (clv * df['Volume']).cumsum()
+
+    if ad_line.isna().all() or len(ad_line.dropna()) < 10:
+        return {'score': 0, 'signals': [], 'details': {}}
+
+    # AD Line 기울기 분석 (최근 10일)
+    ad_recent = ad_line.tail(10).values
+    x = np.arange(len(ad_recent))
+    ad_slope = np.polyfit(x, ad_recent, 1)[0]
+
+    # 기울기 정규화
+    ad_mean = np.abs(ad_recent).mean()
+    if ad_mean > 0:
+        ad_slope_pct = (ad_slope / ad_mean) * 100
+    else:
+        ad_slope_pct = 0
+
+    details['AD_Slope_Pct'] = round(ad_slope_pct, 2)
+
+    # AD Line SMA 비교
+    ad_sma = ad_line.rolling(20).mean()
+    if len(ad_sma.dropna()) >= 1:
+        ad_above_sma = ad_line.iloc[-1] > ad_sma.iloc[-1]
+        details['AD_Above_SMA20'] = bool(ad_above_sma)
+    else:
+        ad_above_sma = None
+
+    # 점수 부여
+    if ad_slope_pct > 5:
+        score += 7
+        signals.append(f"A/D Line 강한 상승 (적극적 매집, {ad_slope_pct:.1f}%)")
+    elif ad_slope_pct > 1:
+        score += 4
+        signals.append("A/D Line 완만한 상승 (매집 진행 중)")
+    elif ad_slope_pct < -5:
+        score -= 3
+        signals.append(f"A/D Line 하락 (분배 진행 중, {ad_slope_pct:.1f}%)")
+
+    # AD가 SMA 위에 있으면 추가 점수
+    if ad_above_sma is True:
+        score += 3
+        signals.append("A/D Line이 20일 이평선 상회 (매집 우위)")
+
+    return {'score': max(-3, min(score, 10)), 'signals': signals, 'details': details}
 
 
 def analyze_breakout(df: pd.DataFrame) -> dict:

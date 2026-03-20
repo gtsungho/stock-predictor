@@ -107,7 +107,7 @@
             xhr.onreadystatechange = function() {
                 if (xhr.readyState === 4) {
                     if (xhr.status === 200) {
-                        window.location.replace('/');
+                        window.location.replace('/?t=' + Date.now());
                     } else {
                         document.getElementById('error').textContent = '비밀번호가 틀렸습니다.';
                         document.getElementById('error').style.display = 'block';

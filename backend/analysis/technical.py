@@ -1,6 +1,6 @@
 """
 기술적 분석 모듈
-RSI, MACD, 볼린저밴드, 이동평균선, 스토캐스틱, ADX 등
+RSI, MACD, 볼린저밴드, 이동평균선, 스토캐스틱, ADX, 다이버전스, 일목균형표 등
 ta 라이브러리 사용
 """
 import pandas as pd
@@ -69,7 +69,129 @@ def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # === MFI ===
     df['MFI'] = ta.volume.money_flow_index(high, low, close, volume, window=14)
 
+    # === 일목균형표 ===
+    ichi = ta.trend.IchimokuIndicator(high, low, window1=9, window2=26, window3=52)
+    df['Ichimoku_Tenkan'] = ichi.ichimoku_conversion_line()
+    df['Ichimoku_Kijun'] = ichi.ichimoku_base_line()
+    df['Ichimoku_SpanA'] = ichi.ichimoku_a()
+    df['Ichimoku_SpanB'] = ichi.ichimoku_b()
+
     return df
+
+
+def analyze_divergence(df: pd.DataFrame) -> tuple[int, list[str]]:
+    """RSI 다이버전스 분석 (만점 15)
+
+    가격 추세와 RSI 추세를 비교하여 다이버전스를 감지한다.
+    - 강세 다이버전스: 가격은 lower low, RSI는 higher low -> 반등 신호
+    - 약세 다이버전스: 가격은 higher high, RSI는 lower high -> 하락 신호
+    """
+    score = 0
+    signals = []
+
+    if len(df) < 30:
+        return score, signals
+
+    # 최근 30봉 기준으로 로컬 저점/고점 찾기
+    lookback = min(60, len(df))
+    recent = df.tail(lookback)
+    close_vals = recent['Close'].values
+    rsi_vals = recent['RSI'].values
+
+    if np.any(np.isnan(rsi_vals)):
+        # NaN이 있으면 유효한 구간만 사용
+        valid_mask = ~np.isnan(rsi_vals)
+        if valid_mask.sum() < 20:
+            return score, signals
+        # 마지막 유효 구간 사용
+        first_valid = np.argmax(valid_mask)
+        close_vals = close_vals[first_valid:]
+        rsi_vals = rsi_vals[first_valid:]
+
+    if len(close_vals) < 20:
+        return score, signals
+
+    # 로컬 저점 찾기 (5봉 기준)
+    local_lows = []
+    for i in range(5, len(close_vals) - 5):
+        if close_vals[i] == min(close_vals[i-5:i+6]):
+            local_lows.append(i)
+
+    # 로컬 고점 찾기 (5봉 기준)
+    local_highs = []
+    for i in range(5, len(close_vals) - 5):
+        if close_vals[i] == max(close_vals[i-5:i+6]):
+            local_highs.append(i)
+
+    # 강세 다이버전스: 가격 lower low + RSI higher low
+    if len(local_lows) >= 2:
+        l1, l2 = local_lows[-2], local_lows[-1]
+        price_lower_low = close_vals[l2] < close_vals[l1]
+        rsi_higher_low = rsi_vals[l2] > rsi_vals[l1]
+        if price_lower_low and rsi_higher_low:
+            score += 15
+            signals.append("강세 다이버전스 (가격↓ RSI↑, 반등 신호)")
+
+    # 약세 다이버전스: 가격 higher high + RSI lower high
+    if len(local_highs) >= 2:
+        h1, h2 = local_highs[-2], local_highs[-1]
+        price_higher_high = close_vals[h2] > close_vals[h1]
+        rsi_lower_high = rsi_vals[h2] < rsi_vals[h1]
+        if price_higher_high and rsi_lower_high:
+            score -= 10
+            signals.append("약세 다이버전스 (가격↑ RSI↓, 하락 주의)")
+
+    return score, signals
+
+
+def analyze_ichimoku(df: pd.DataFrame) -> tuple[int, list[str]]:
+    """일목균형표 분석 (만점 10)
+
+    - 가격이 구름 위에 있으면 상승 추세 (+5)
+    - 전환선이 기준선 위로 교차하면 매수 신호 (+5)
+    - 가격이 구름 아래면 하락 추세 감점
+    """
+    score = 0
+    signals = []
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) >= 2 else last
+    close = last['Close']
+
+    tenkan = last.get('Ichimoku_Tenkan')
+    kijun = last.get('Ichimoku_Kijun')
+    span_a = last.get('Ichimoku_SpanA')
+    span_b = last.get('Ichimoku_SpanB')
+
+    prev_tenkan = prev.get('Ichimoku_Tenkan')
+    prev_kijun = prev.get('Ichimoku_Kijun')
+
+    if not all(pd.notna(v) for v in [tenkan, kijun, span_a, span_b]):
+        return score, signals
+
+    cloud_top = max(span_a, span_b)
+    cloud_bottom = min(span_a, span_b)
+
+    # 가격 vs 구름 위치
+    if close > cloud_top:
+        score += 5
+        signals.append("일목: 가격이 구름 위 (상승 추세)")
+    elif close < cloud_bottom:
+        score -= 5
+        signals.append("일목: 가격이 구름 아래 (하락 추세)")
+    else:
+        signals.append("일목: 가격이 구름 내부 (방향 불명확)")
+
+    # 전환선/기준선 크로스
+    if pd.notna(prev_tenkan) and pd.notna(prev_kijun):
+        if prev_tenkan <= prev_kijun and tenkan > kijun:
+            score += 5
+            signals.append("일목: 전환선 상향 교차 (매수 신호)")
+        elif prev_tenkan >= prev_kijun and tenkan < kijun:
+            score -= 3
+            signals.append("일목: 전환선 하향 교차 (매도 신호)")
+
+    return score, signals
 
 
 def analyze_technical(df: pd.DataFrame) -> dict:
@@ -153,14 +275,21 @@ def analyze_technical(df: pd.DataFrame) -> dict:
     bb_upper = last.get('BB_Upper')
     bb_mid = last.get('BB_Mid')
 
-    if pd.notna(bb_lower) and pd.notna(bb_upper):
+    if pd.notna(bb_lower) and pd.notna(bb_upper) and bb_upper > bb_lower:
         bb_width = last.get('BB_Width', 0)
         details['BB_Width'] = round(bb_width, 4) if pd.notna(bb_width) else 0
+
+        # 하단 밴드로부터의 거리를 밴드 폭 대비 비율로 계산
+        bb_range = bb_upper - bb_lower
+        if bb_range <= 0:
+            bb_range = 1  # division by zero 방어
+        pct_from_lower = (close - bb_lower) / bb_range  # 0.0 = 하단, 1.0 = 상단
 
         if close <= bb_lower:
             score += 10
             signals.append("볼린저 하단 터치 (반등 기대)")
-        elif close <= bb_lower * 1.02:
+        elif pct_from_lower <= 0.05:
+            # 하단 밴드에서 밴드 폭의 5% 이내
             score += 7
             signals.append("볼린저 하단 근접")
         elif close >= bb_upper:
@@ -180,9 +309,11 @@ def analyze_technical(df: pd.DataFrame) -> dict:
         if stoch_k < 20 and stoch_d < 20:
             score += 8
             signals.append("스토캐스틱 과매도")
-            if pd.notna(prev_k) and prev_k < stoch_k and prev_k < prev_d and stoch_k > stoch_d:
-                score += 2
-                signals.append("스토캐스틱 골든크로스")
+            # 골든크로스: 이전에 K <= D 였다가 현재 K > D 로 교차
+            if pd.notna(prev_k) and pd.notna(prev_d):
+                if prev_k <= prev_d and stoch_k > stoch_d:
+                    score += 2
+                    signals.append("스토캐스틱 골든크로스")
         elif stoch_k > 80:
             score -= 5
             signals.append("스토캐스틱 과매수")
@@ -237,9 +368,18 @@ def analyze_technical(df: pd.DataFrame) -> dict:
     if sr_score > 0:
         signals.append(f"지지선 근접 (+{sr_score})")
 
-    # 정규화 (0-100)
-    max_possible = 100
-    normalized_score = max(0, min(100, (score / max_possible) * 100))
+    # === 다이버전스 분석 (만점 15) ===
+    div_score, div_signals = analyze_divergence(df)
+    score += div_score
+    signals.extend(div_signals)
+
+    # === 일목균형표 분석 (만점 10) ===
+    ichi_score, ichi_signals = analyze_ichimoku(df)
+    score += ichi_score
+    signals.extend(ichi_signals)
+
+    # 정규화 (0-100) - 각 구성요소의 합이 이미 ~100 만점이므로 단순 클램핑
+    normalized_score = max(0, min(100, score))
 
     return {
         'score': round(normalized_score, 2),

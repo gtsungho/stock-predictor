@@ -102,6 +102,44 @@ body {
     transform: none;
 }
 
+/* === 검색 패널 === */
+.search-panel {
+    display: flex;
+    gap: 8px;
+    margin: 0 0 12px;
+}
+
+.search-panel input {
+    flex: 1;
+    padding: 10px 14px;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-size: 14px;
+    outline: none;
+}
+
+.search-panel input:focus {
+    border-color: var(--accent);
+}
+
+.search-panel button {
+    padding: 10px 20px;
+    border: none;
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    color: var(--accent);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid var(--accent);
+}
+
+.search-panel button:active {
+    opacity: 0.8;
+}
+
 .btn-secondary {
     background: var(--bg-card);
     color: var(--text-primary);
@@ -215,6 +253,42 @@ body {
     outline: none;
 }
 
+/* === 탭 바 === */
+.tab-section {
+    margin: 12px 0 8px;
+}
+
+.tab-bar {
+    display: flex;
+    gap: 4px;
+    background: var(--bg-secondary);
+    border-radius: 12px;
+    padding: 4px;
+}
+
+.tab {
+    flex: 1;
+    padding: 8px 4px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.tab.active {
+    background: var(--accent);
+    color: #000;
+}
+
+.tab:not(.active):active {
+    background: rgba(255,255,255,0.1);
+}
+
 /* === 종목 리스트 === */
 .stock-list {
     display: flex;
@@ -325,6 +399,12 @@ body {
 .trade-pct {
     font-size: 11px;
     font-weight: 600;
+}
+
+.trade-krw {
+    display: block;
+    font-size: 10px;
+    color: var(--text-secondary);
 }
 
 .green { color: var(--green) !important; }

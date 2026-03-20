@@ -56,14 +56,14 @@ def get_fallback_stocks() -> list:
         "SNPS", "CDNS", "MRVL", "ON", "SWKS", "MCHP", "ADI", "NXPI", "FTNT", "PANW",
         # 바이오/헬스케어
         "AMGN", "GILD", "BIIB", "REGN", "VRTX", "MRNA", "BNTX", "ILMN", "DXCM", "ISRG",
-        "IDXX", "ALGN", "HOLX", "TECH", "BIO",
+        "IDXX", "ALGN", "HOLX",
         # 소비재/서비스
-        "COST", "PEP", "SBUX", "MDLZ", "MNST", "KDP", "WBA", "DLTR", "ROST", "ORLY",
+        "COST", "PEP", "SBUX", "MDLZ", "MNST", "KDP", "DLTR", "ROST", "ORLY",
         "PCAR", "ODFL", "FAST", "CPRT", "CSGP",
         # 통신/미디어
-        "CMCSA", "TMUS", "CHTR", "ATVI", "EA", "TTWO", "ZM", "ROKU", "SPOT",
+        "CMCSA", "TMUS", "CHTR", "EA", "TTWO", "ZM", "ROKU", "SPOT",
         # 금융/핀테크
-        "COIN", "SQ", "SOFI", "HOOD", "AFRM", "UPST", "LC",
+        "COIN", "SOFI", "HOOD", "AFRM", "UPST", "LC",
         # 에너지/소재
         "FSLR", "ENPH", "SEDG", "RUN",
         # AMEX 주요 종목
@@ -77,6 +77,53 @@ def get_fallback_stocks() -> list:
     ]
 
 
+def validate_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """OHLCV 데이터 무결성 검증 및 정제
+
+    검증 항목:
+    - High >= Low 인지 확인
+    - Open이 High/Low 범위 내에 있는지 확인
+    - Close가 High/Low 범위 내에 있는지 확인
+    - Volume이 음수가 아닌지 확인
+    - NaN/Inf 값 제거
+
+    무효한 행은 제거하고 유효한 데이터만 반환
+    """
+    if df.empty:
+        return df
+
+    required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+    if not all(col in df.columns for col in required_cols):
+        return pd.DataFrame()
+
+    # NaN/Inf 값이 있는 행 제거
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.dropna(subset=required_cols)
+
+    if df.empty:
+        return df
+
+    # High >= Low
+    valid_hl = df['High'] >= df['Low']
+
+    # Open이 High/Low 범위 내
+    valid_open = (df['Open'] >= df['Low']) & (df['Open'] <= df['High'])
+
+    # Close가 High/Low 범위 내
+    valid_close = (df['Close'] >= df['Low']) & (df['Close'] <= df['High'])
+
+    # Volume >= 0
+    valid_volume = df['Volume'] >= 0
+
+    valid_mask = valid_hl & valid_open & valid_close & valid_volume
+    invalid_count = (~valid_mask).sum()
+
+    if invalid_count > 0:
+        print(f"  OHLCV 검증: {invalid_count}개 무효 행 제거됨")
+
+    return df[valid_mask].copy()
+
+
 def fetch_stock_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
     """개별 종목 데이터 가져오기"""
     cache_file = CACHE_DIR / f"{ticker}_{period}.csv"
@@ -86,7 +133,8 @@ def fetch_stock_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
         mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
         if datetime.now() - mtime < timedelta(hours=4):
             try:
-                return pd.read_csv(cache_file, index_col=0, parse_dates=True)
+                df = pd.read_csv(cache_file, index_col=0, parse_dates=True)
+                return validate_ohlcv(df)
             except Exception:
                 pass
 
@@ -98,6 +146,7 @@ def fetch_stock_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
 
         df.index = pd.to_datetime(df.index)
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+        df = validate_ohlcv(df)
         df.to_csv(cache_file)
         return df
     except Exception as e:
@@ -133,6 +182,7 @@ def fetch_stock_info(ticker: str) -> dict:
             'averageVolume', 'averageVolume10days',
             'beta', 'dividendYield', 'targetMeanPrice', 'recommendationMean',
             'exchange', 'quoteType',
+            'earningsTimestamp', 'earningsTimestampStart', 'earningsTimestampEnd', 'earningsDate',
         ]
         filtered = {}
         for f in fields:
@@ -165,7 +215,35 @@ def batch_fetch(tickers: list, period: str = "6mo", delay: float = 0.1) -> dict:
     return results
 
 
-def prefilter_stocks(tickers: list, min_price: float = 1.0, min_volume: int = 100000) -> list:
+def get_usd_krw_rate() -> float:
+    """USD/KRW 환율 가져오기 (캐시 1시간)"""
+    cache_file = CACHE_DIR / "usd_krw.json"
+
+    if cache_file.exists():
+        mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
+        if datetime.now() - mtime < timedelta(hours=1):
+            try:
+                with open(cache_file) as f:
+                    data = json.load(f)
+                    return data.get('rate', 1350)
+            except Exception:
+                pass
+
+    try:
+        ticker = yf.Ticker("KRW=X")
+        hist = ticker.history(period="1d")
+        if not hist.empty:
+            rate = round(hist['Close'].iloc[-1], 2)
+            with open(cache_file, 'w') as f:
+                json.dump({'rate': rate, 'updated': datetime.now().isoformat()}, f)
+            return rate
+    except Exception as e:
+        print(f"환율 조회 실패: {e}")
+
+    return 1350  # 폴백값
+
+
+def prefilter_stocks(tickers: list, min_price: float = 3.0, min_volume: int = 100000) -> list:
     """초기 필터링: 너무 싼 주식, 거래량 낮은 주식 제외"""
     filtered = []
     for ticker in tickers:
@@ -180,3 +258,46 @@ def prefilter_stocks(tickers: list, min_price: float = 1.0, min_volume: int = 10
         except Exception:
             continue
     return filtered
+
+
+def scan_daily_gainers(tickers: list, top_n: int = 30) -> list:
+    """당일 상승률 상위 종목 스크리닝"""
+    gainers = []
+    for ticker in tickers:
+        try:
+            df = fetch_stock_data(ticker, period="5d")
+            if df.empty or len(df) < 2:
+                continue
+            last = df.iloc[-1]
+            prev = df.iloc[-2]
+            change_pct = (last['Close'] - prev['Close']) / prev['Close'] * 100
+            avg_vol = df['Volume'].mean()
+            if avg_vol >= 50000 and last['Close'] >= 3.0:
+                gainers.append((ticker, change_pct))
+        except Exception:
+            continue
+
+    gainers.sort(key=lambda x: x[1], reverse=True)
+    return [t for t, _ in gainers[:top_n]]
+
+
+def scan_volume_surge(tickers: list, top_n: int = 30) -> list:
+    """거래량 급증 종목 스크리닝"""
+    surges = []
+    for ticker in tickers:
+        try:
+            df = fetch_stock_data(ticker, period="1mo")
+            if df.empty or len(df) < 10:
+                continue
+            last = df.iloc[-1]
+            avg_vol_20 = df['Volume'].tail(20).mean()
+            if avg_vol_20 == 0:
+                continue
+            vol_ratio = last['Volume'] / avg_vol_20
+            if vol_ratio >= 1.5 and last['Close'] >= 3.0 and avg_vol_20 >= 50000:
+                surges.append((ticker, vol_ratio))
+        except Exception:
+            continue
+
+    surges.sort(key=lambda x: x[1], reverse=True)
+    return [t for t, _ in surges[:top_n]]

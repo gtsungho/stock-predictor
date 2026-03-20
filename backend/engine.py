@@ -1,5 +1,6 @@
 """
 분석 엔진 - 전체 파이프라인 오케스트레이션
+4개 탭: 종합 TOP 20, 우량주, 급등주, 거래량 폭발
 """
 import sys
 from pathlib import Path
@@ -13,7 +14,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from data.fetcher import (
     get_stock_list, get_fallback_stocks, fetch_stock_data,
-    fetch_stock_info, batch_fetch, prefilter_stocks
+    fetch_stock_info, batch_fetch, prefilter_stocks,
+    scan_daily_gainers, scan_volume_surge, get_usd_krw_rate
 )
 from analysis.technical import analyze_technical
 from analysis.momentum import analyze_momentum
@@ -25,25 +27,57 @@ RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
 
+def filter_by_probability(stocks: list, start_threshold: float = 70.0, step: float = 2.0, min_threshold: float = 50.0) -> tuple:
+    """
+    1일 또는 5일 상승 확률이 threshold 이상인 종목만 필터링.
+    해당 종목이 0건이면 threshold를 step%씩 낮추면서 재시도.
+    Returns: (filtered_stocks, applied_threshold)
+    """
+    if not stocks:
+        return [], 0
+
+    threshold = start_threshold
+    while threshold >= min_threshold:
+        filtered = [
+            s for s in stocks
+            if s.get('rise_probability_1d', 0) >= threshold
+            or s.get('rise_probability_5d', 0) >= threshold
+        ]
+        if filtered:
+            # 확률 높은 순 정렬
+            filtered.sort(
+                key=lambda x: max(x.get('rise_probability_1d', 0), x.get('rise_probability_5d', 0)),
+                reverse=True
+            )
+            return filtered, threshold
+        threshold -= step
+
+    # 최소 임계값에서도 없으면 전체 중 상위 5개
+    stocks_sorted = sorted(
+        stocks,
+        key=lambda x: max(x.get('rise_probability_1d', 0), x.get('rise_probability_5d', 0)),
+        reverse=True
+    )
+    actual_threshold = max(
+        stocks_sorted[0].get('rise_probability_1d', 0),
+        stocks_sorted[0].get('rise_probability_5d', 0)
+    ) if stocks_sorted else 0
+    return stocks_sorted[:5], round(actual_threshold, 1)
+
+
 def analyze_single_stock(ticker: str, period: str = "6mo") -> dict:
     """단일 종목 전체 분석"""
     try:
-        # 데이터 수집
         df = fetch_stock_data(ticker, period)
         if df.empty or len(df) < 30:
             return None
 
         info = fetch_stock_info(ticker)
-
-        # 각 분석 실행
         technical_result = analyze_technical(df)
         momentum_result = analyze_momentum(df)
         fundamental_result = analyze_fundamental(info)
-
-        # ML 예측
         ml_result = predict_stock(df)
 
-        # 앙상블 스코어링
         result = calculate_ensemble_score(
             technical_result=technical_result,
             momentum_result=momentum_result,
@@ -53,7 +87,6 @@ def analyze_single_stock(ticker: str, period: str = "6mo") -> dict:
             df=df,
         )
         result['ticker'] = ticker
-
         return result
 
     except Exception as e:
@@ -61,101 +94,199 @@ def analyze_single_stock(ticker: str, period: str = "6mo") -> dict:
         return None
 
 
+def analyze_batch(tickers: list, workers: int = 4, progress_callback=None,
+                  progress_start: int = 0, progress_end: int = 100) -> list:
+    """종목 배치 분석"""
+    results = []
+    completed = 0
+    total = len(tickers)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(analyze_single_stock, t): t for t in tickers}
+
+        for future in as_completed(futures):
+            completed += 1
+            try:
+                result = future.result()
+                if result:
+                    results.append(result)
+            except Exception:
+                pass
+
+            if completed % 10 == 0 and progress_callback:
+                pct = progress_start + int((completed / total) * (progress_end - progress_start))
+                progress_callback('analyzing', f'{completed}/{total} 분석 완료', pct)
+
+    return results
+
+
 def run_full_analysis(
     max_stocks: int = 100,
-    min_score: float = 40,
+    min_score: float = 0,
     top_n: int = 20,
     workers: int = 4,
     progress_callback=None,
 ) -> dict:
     """
-    전체 분석 파이프라인 실행
-
-    1. 종목 리스트 가져오기
-    2. 초기 필터링
-    3. 병렬 분석
-    4. 순위화
-    5. 결과 저장
+    전체 분석 파이프라인 (4개 탭)
+    1. 우량주 분석 (고정 리스트)
+    2. 급등주 스크리닝
+    3. 거래량 폭발 스크리닝
+    4. 종합 TOP 20 (전체 합산)
     """
     start_time = time.time()
 
-    # 1단계: 종목 리스트
+    # === 1단계: 우량주 리스트 ===
     if progress_callback:
-        progress_callback('loading', '종목 리스트 로딩 중...', 0)
+        progress_callback('loading', '우량주 리스트 로딩 중...', 0)
 
-    all_tickers = get_fallback_stocks()  # 안정적인 폴백 리스트 사용
-    print(f"총 {len(all_tickers)}개 종목 대상")
+    bluechip_tickers = get_fallback_stocks()[:max_stocks]
+    print(f"우량주 {len(bluechip_tickers)}개 분석 시작")
 
-    # 분석할 종목 수 제한
-    tickers = all_tickers[:max_stocks]
-
+    # === 2단계: 우량주 분석 ===
     if progress_callback:
-        progress_callback('analyzing', f'{len(tickers)}개 종목 분석 시작', 10)
+        progress_callback('analyzing', f'우량주 {len(bluechip_tickers)}개 분석 중...', 5)
 
-    # 2단계: 병렬 분석
-    results = []
-    completed = 0
-    total = len(tickers)
+    bluechip_results = analyze_batch(
+        bluechip_tickers, workers=workers,
+        progress_callback=progress_callback,
+        progress_start=5, progress_end=50,
+    )
+    print(f"  우량주 분석 완료: {len(bluechip_results)}개")
 
-    def analyze_with_progress(ticker):
-        return analyze_single_stock(ticker)
-
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(analyze_with_progress, t): t for t in tickers}
-
-        for future in as_completed(futures):
-            ticker = futures[future]
-            completed += 1
-
-            try:
-                result = future.result()
-                if result and result['final_score'] >= min_score:
-                    results.append(result)
-            except Exception as e:
-                print(f"  {ticker} 오류: {e}")
-
-            if completed % 10 == 0:
-                pct = 10 + int((completed / total) * 80)
-                if progress_callback:
-                    progress_callback('analyzing', f'{completed}/{total} 완료', pct)
-                print(f"  진행: {completed}/{total} ({len(results)}개 후보)")
-
-    # 3단계: 순위화
+    # === 3단계: 급등주 스크리닝 ===
     if progress_callback:
-        progress_callback('ranking', '순위 산출 중...', 90)
+        progress_callback('scanning', '급등주 스크리닝 중...', 55)
 
-    ranked = rank_stocks(results)
-    top_picks = ranked[:top_n]
+    gainer_tickers = scan_daily_gainers(bluechip_tickers, top_n=30)
+    # 이미 분석된 종목은 재사용
+    analyzed_tickers = {r['ticker'] for r in bluechip_results}
+    gainer_new = [t for t in gainer_tickers if t not in analyzed_tickers]
+
+    gainer_extra = analyze_batch(gainer_new, workers=workers) if gainer_new else []
+    all_results_map = {r['ticker']: r for r in bluechip_results + gainer_extra}
+
+    gainers = []
+    for t in gainer_tickers:
+        if t in all_results_map:
+            gainers.append(all_results_map[t])
+    # 상승률 순 정렬
+    gainers.sort(key=lambda x: x.get('price_info', {}).get('change_pct', 0), reverse=True)
+    gainers = gainers[:top_n]
+
+    print(f"  급등주: {len(gainers)}개")
+
+    # === 4단계: 거래량 폭발 스크리닝 ===
+    if progress_callback:
+        progress_callback('scanning', '거래량 급증 종목 스크리닝 중...', 70)
+
+    volume_tickers = scan_volume_surge(bluechip_tickers, top_n=30)
+    volume_new = [t for t in volume_tickers if t not in all_results_map]
+
+    volume_extra = analyze_batch(volume_new, workers=workers) if volume_new else []
+    all_results_map.update({r['ticker']: r for r in volume_extra})
+
+    volume_surge = []
+    for t in volume_tickers:
+        if t in all_results_map:
+            volume_surge.append(all_results_map[t])
+    # 거래량 비율 순 정렬
+    volume_surge.sort(
+        key=lambda x: x.get('details', {}).get('Volume_Ratio_20D', 0), reverse=True
+    )
+    volume_surge = volume_surge[:top_n]
+
+    print(f"  거래량 폭발: {len(volume_surge)}개")
+
+    # === 5단계: 확률 기반 필터링 ===
+    if progress_callback:
+        progress_callback('ranking', '확률 기반 필터링 중...', 90)
+
+    all_results = list(all_results_map.values())
+
+    # 각 탭별 확률 필터링 (70% 시작, 2%씩 하향)
+    top_filtered, top_threshold = filter_by_probability(all_results)
+    bluechip_filtered, bc_threshold = filter_by_probability(bluechip_results)
+    gainers_filtered, gn_threshold = filter_by_probability(gainers) if gainers else ([], 0)
+    volume_filtered, vol_threshold = filter_by_probability(volume_surge) if volume_surge else ([], 0)
+
+    # 순위 부여
+    for i, s in enumerate(top_filtered):
+        s['rank'] = i + 1
+    for i, s in enumerate(bluechip_filtered):
+        s['rank'] = i + 1
+    for i, s in enumerate(gainers_filtered):
+        s['rank'] = i + 1
+    for i, s in enumerate(volume_filtered):
+        s['rank'] = i + 1
 
     elapsed = time.time() - start_time
 
-    # 4단계: 결과 저장
+    # === 환율 ===
+    usd_krw = get_usd_krw_rate()
+
+    # === 결과 저장 ===
     output = {
         'timestamp': datetime.now().isoformat(),
-        'analyzed_count': total,
-        'qualified_count': len(results),
-        'top_picks': top_picks,
+        'analyzed_count': len(all_results_map),
         'elapsed_seconds': round(elapsed, 1),
-        'parameters': {
-            'max_stocks': max_stocks,
-            'min_score': min_score,
-            'top_n': top_n,
+        'usd_krw': usd_krw,
+        'tabs': {
+            'top20': {
+                'label': f'종합 TOP ({top_threshold}%↑)',
+                'count': len(top_filtered),
+                'stocks': top_filtered,
+                'threshold': top_threshold,
+            },
+            'bluechip': {
+                'label': f'우량주 ({bc_threshold}%↑)',
+                'count': len(bluechip_filtered),
+                'stocks': bluechip_filtered,
+                'threshold': bc_threshold,
+            },
+            'gainers': {
+                'label': f'급등주 ({gn_threshold}%↑)',
+                'count': len(gainers_filtered),
+                'stocks': gainers_filtered,
+                'threshold': gn_threshold,
+            },
+            'volume': {
+                'label': f'거래량 ({vol_threshold}%↑)',
+                'count': len(volume_filtered),
+                'stocks': volume_filtered,
+                'threshold': vol_threshold,
+            },
         },
+        'qualified_count': len(top_filtered),
+        'top_picks': top_filtered,
     }
+
+    import math
+    def _sanitize(obj):
+        if isinstance(obj, dict):
+            return {k: _sanitize(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [_sanitize(v) for v in obj]
+        elif isinstance(obj, float):
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+            return obj
+        return obj
+
+    output = _sanitize(output)
 
     result_file = RESULTS_DIR / f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     with open(result_file, 'w') as f:
         json.dump(output, f, indent=2, default=str)
 
-    # 최신 결과 링크
     latest_file = RESULTS_DIR / "latest.json"
     with open(latest_file, 'w') as f:
         json.dump(output, f, indent=2, default=str)
 
     if progress_callback:
-        progress_callback('done', f'분석 완료! {len(top_picks)}개 추천 종목', 100)
+        progress_callback('done', f'분석 완료! {len(top_filtered)}개 추천', 100)
 
-    print(f"\n분석 완료: {elapsed:.1f}초, {len(top_picks)}개 추천 종목")
+    print(f"\n분석 완료: {elapsed:.1f}초")
     return output
 
 
@@ -166,16 +297,3 @@ def get_latest_results() -> dict:
         with open(latest_file) as f:
             return json.load(f)
     return None
-
-
-if __name__ == '__main__':
-    print("=== Stock Predictor 분석 시작 ===")
-    results = run_full_analysis(max_stocks=50, top_n=15)
-    print(f"\n=== 상위 추천 종목 ===")
-    for pick in results['top_picks']:
-        print(f"  {pick['rank']:2d}. {pick['ticker']:6s} | "
-              f"점수: {pick['final_score']:5.1f} | "
-              f"등급: {pick['grade']} | "
-              f"1일 상승확률: {pick['rise_probability_1d']:.0f}% | "
-              f"5일 상승확률: {pick['rise_probability_5d']:.0f}% | "
-              f"{pick['recommendation']}")
