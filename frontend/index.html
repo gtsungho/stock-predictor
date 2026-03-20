@@ -13,25 +13,18 @@
 </head>
 <body>
     <div id="app">
-        <!-- 헤더 -->
         <header class="header">
             <h1>Stock Predictor</h1>
-            <p class="subtitle">NASDAQ / AMEX AI 분석</p>
+            <p class="subtitle">AI 매수 추천 &amp; 매매 전략</p>
         </header>
 
-        <!-- 컨트롤 패널 -->
         <div class="control-panel">
             <button id="btn-analyze" class="btn-primary" onclick="startAnalysis()">
-                분석 시작
+                종목 스캔 시작
             </button>
             <button id="btn-refresh" class="btn-secondary" onclick="loadResults()">
-                결과 새로고침
+                새로고침
             </button>
-            <div id="search-box" class="search-box">
-                <input type="text" id="search-ticker" placeholder="종목 검색 (예: AAPL)"
-                       onkeypress="if(event.key==='Enter') searchStock()">
-                <button onclick="searchStock()">검색</button>
-            </div>
         </div>
 
         <!-- 진행 상태 -->
@@ -42,23 +35,23 @@
             <p id="progress-text" class="progress-text">준비 중...</p>
         </div>
 
-        <!-- 요약 카드 -->
+        <!-- 요약 -->
         <div id="summary-section" class="summary-section hidden">
             <div class="summary-cards">
                 <div class="summary-card">
-                    <span class="summary-label">분석 종목</span>
+                    <span class="summary-label">스캔 종목</span>
                     <span id="total-analyzed" class="summary-value">-</span>
                 </div>
                 <div class="summary-card">
-                    <span class="summary-label">추천 종목</span>
-                    <span id="total-qualified" class="summary-value">-</span>
+                    <span class="summary-label">매수 추천</span>
+                    <span id="total-qualified" class="summary-value highlight">-</span>
                 </div>
                 <div class="summary-card">
                     <span class="summary-label">분석 시간</span>
                     <span id="elapsed-time" class="summary-value">-</span>
                 </div>
                 <div class="summary-card">
-                    <span class="summary-label">마지막 분석</span>
+                    <span class="summary-label">업데이트</span>
                     <span id="last-update" class="summary-value">-</span>
                 </div>
             </div>
@@ -68,32 +61,33 @@
         <div id="filter-section" class="filter-section hidden">
             <select id="filter-grade" onchange="filterResults()">
                 <option value="all">전체 등급</option>
-                <option value="S">S등급</option>
-                <option value="A">A등급</option>
-                <option value="B">B등급</option>
+                <option value="S">S 강력매수</option>
+                <option value="A">A 매수</option>
+                <option value="B">B 관심</option>
             </select>
-            <select id="filter-risk" onchange="filterResults()">
-                <option value="all">전체 리스크</option>
-                <option value="낮음">낮음</option>
-                <option value="보통">보통</option>
-                <option value="높음">높음</option>
+            <select id="filter-strategy" onchange="filterResults()">
+                <option value="all">전체 전략</option>
+                <option value="단타">단타 (당일)</option>
+                <option value="스윙">스윙 (3~5일)</option>
+                <option value="단기 보유">단기 보유</option>
             </select>
             <select id="sort-by" onchange="sortResults()">
                 <option value="score">점수순</option>
-                <option value="prob1d">1일 확률순</option>
-                <option value="prob5d">5일 확률순</option>
+                <option value="target5d">목표수익순</option>
+                <option value="rr">리워드/리스크순</option>
             </select>
         </div>
 
         <!-- 종목 리스트 -->
         <div id="stock-list" class="stock-list">
             <div class="empty-state">
-                <p>분석 결과가 없습니다.</p>
-                <p>상단의 "분석 시작" 버튼을 눌러주세요.</p>
+                <p>아직 분석 결과가 없습니다.</p>
+                <p>"종목 스캔 시작" 버튼을 누르면</p>
+                <p>AI가 자동으로 매수할 종목을 찾아줍니다.</p>
             </div>
         </div>
 
-        <!-- 종목 상세 모달 -->
+        <!-- 상세 모달 -->
         <div id="modal" class="modal hidden" onclick="if(event.target===this)closeModal()">
             <div class="modal-content">
                 <div class="modal-header">

@@ -1,6 +1,7 @@
 """
 앙상블 스코어링 모듈
 기술적 분석 + 모멘텀 + 펀더멘털 + ML을 종합하여 최종 점수 산출
+매수가, 목표가, 손절가, 보유기간 추천 포함
 """
 import pandas as pd
 import numpy as np
@@ -24,23 +25,6 @@ def calculate_ensemble_score(
     info: dict = None,
     df: pd.DataFrame = None,
 ) -> dict:
-    """
-    모든 분석 결과를 종합하여 최종 스코어 산출
-
-    Returns:
-        {
-            'ticker': str,
-            'final_score': float (0-100),
-            'grade': str (S/A/B/C/D/F),
-            'recommendation': str,
-            'rise_probability_1d': float,
-            'rise_probability_5d': float,
-            'scores': {모듈별 점수},
-            'top_signals': [주요 시그널],
-            'risk_level': str,
-            'details': {세부 정보},
-        }
-    """
     scores = {
         'technical': technical_result.get('score', 0),
         'momentum': momentum_result.get('score', 0),
@@ -51,51 +35,36 @@ def calculate_ensemble_score(
     # 가중 평균 점수
     final_score = sum(scores[k] * WEIGHTS[k] for k in WEIGHTS)
 
-    # 보너스/페널티 조정
+    # 보너스/페널티
     bonus = 0
-
-    # 다중 시그널 일치 보너스 (여러 분석이 동시에 높으면 추가 점수)
     high_scores = sum(1 for s in scores.values() if s >= 60)
     if high_scores >= 3:
         bonus += 10
     elif high_scores >= 2:
         bonus += 5
-
-    # 모든 분석이 긍정적이면 추가 보너스
     if all(s >= 50 for s in scores.values()):
         bonus += 5
-
-    # 극단적 부정 시그널이 있으면 페널티
     if any(s < 20 for s in scores.values()):
         bonus -= 5
 
     final_score = max(0, min(100, final_score + bonus))
 
-    # 등급 산정
     grade = calculate_grade(final_score)
-
-    # 상승 확률 추정
     prob_1d = estimate_probability(final_score, ml_result, '1d')
     prob_5d = estimate_probability(final_score, ml_result, '5d')
 
-    # 주요 시그널 수집 (상위 5개)
     all_signals = []
     for result in [technical_result, momentum_result, fundamental_result, ml_result]:
         all_signals.extend(result.get('signals', []))
     top_signals = all_signals[:8]
 
-    # 리스크 레벨
     risk_level = assess_risk(scores, df, info)
-
-    # 추천 문구
     recommendation = generate_recommendation(grade, prob_1d, prob_5d, risk_level)
 
-    # 추가 정보
     details = {}
     for result in [technical_result, momentum_result, fundamental_result, ml_result]:
         details.update(result.get('details', {}))
 
-    # 종목 기본 정보
     stock_info = {}
     if info:
         stock_info = {
@@ -117,6 +86,9 @@ def calculate_ensemble_score(
             'volume': int(last['Volume']),
         }
 
+    # === 매매 전략 계산 ===
+    trade_plan = calculate_trade_plan(df, info, final_score, prob_1d, prob_5d, risk_level)
+
     return {
         'final_score': round(final_score, 1),
         'grade': grade,
@@ -128,13 +100,161 @@ def calculate_ensemble_score(
         'risk_level': risk_level,
         'stock_info': stock_info,
         'price_info': price_info,
+        'trade_plan': trade_plan,
         'details': details,
         'analyzed_at': datetime.now().isoformat(),
     }
 
 
+def calculate_trade_plan(
+    df: pd.DataFrame,
+    info: dict,
+    final_score: float,
+    prob_1d: float,
+    prob_5d: float,
+    risk_level: str,
+) -> dict:
+    """
+    매매 전략 계산
+    - 매수가 (진입 가격)
+    - 목표가 (몇 %에서 매도)
+    - 손절가 (손실 제한)
+    - 보유 기간 추천
+    - 예상 수익률
+    """
+    if df is None or df.empty or len(df) < 20:
+        return {}
+
+    last = df.iloc[-1]
+    current_price = last['Close']
+
+    # === 변동성 계산 (ATR 기반) ===
+    tr = pd.concat([
+        df['High'] - df['Low'],
+        (df['High'] - df['Close'].shift(1)).abs(),
+        (df['Low'] - df['Close'].shift(1)).abs()
+    ], axis=1).max(axis=1)
+    atr_14 = tr.tail(14).mean()
+    atr_pct = (atr_14 / current_price) * 100  # ATR을 %로
+
+    # 최근 20일 변동성
+    daily_vol = df['Close'].pct_change().tail(20).std() * 100
+
+    # === 지지선/저항선 계산 ===
+    recent = df.tail(60)
+    support = recent['Low'].rolling(5).min().dropna().tail(10).median()
+    resistance = recent['High'].rolling(5).max().dropna().tail(10).median()
+
+    # 52주 고/저
+    high_52w = df['High'].max()
+    low_52w = df['Low'].min()
+
+    # === 매수가 (진입 가격) ===
+    # 현재가 기준, 약간의 눌림목 매수 고려
+    entry_price = round(current_price, 2)
+    # 지정가 매수 추천 (현재가 대비 약간 아래)
+    limit_price = round(current_price * (1 - atr_pct * 0.003), 2)
+
+    # === 목표가 계산 ===
+    # 등급과 확률에 따라 목표 수익률 조정
+    if final_score >= 85:  # S등급
+        target_pct_1d = max(2.0, min(atr_pct * 0.8, 8.0))
+        target_pct_5d = max(4.0, min(atr_pct * 2.0, 15.0))
+    elif final_score >= 70:  # A등급
+        target_pct_1d = max(1.5, min(atr_pct * 0.6, 5.0))
+        target_pct_5d = max(3.0, min(atr_pct * 1.5, 12.0))
+    elif final_score >= 55:  # B등급
+        target_pct_1d = max(1.0, min(atr_pct * 0.5, 4.0))
+        target_pct_5d = max(2.0, min(atr_pct * 1.2, 8.0))
+    else:  # C등급 이하
+        target_pct_1d = max(0.8, min(atr_pct * 0.4, 3.0))
+        target_pct_5d = max(1.5, min(atr_pct * 1.0, 6.0))
+
+    # 저항선 고려 (저항선이 가까우면 목표가 낮춤)
+    resistance_dist_pct = ((resistance - current_price) / current_price) * 100
+    if resistance_dist_pct > 0 and resistance_dist_pct < target_pct_5d:
+        target_pct_5d = max(target_pct_5d * 0.7, resistance_dist_pct * 0.9)
+
+    # 애널리스트 목표가 참고
+    analyst_target = None
+    if info:
+        at = info.get('targetMeanPrice')
+        if at and isinstance(at, (int, float)) and at > current_price:
+            analyst_target = round(at, 2)
+            analyst_upside = ((at - current_price) / current_price) * 100
+
+    target_price_1d = round(current_price * (1 + target_pct_1d / 100), 2)
+    target_price_5d = round(current_price * (1 + target_pct_5d / 100), 2)
+
+    # === 손절가 계산 ===
+    # ATR 기반 손절 (1.5~2배 ATR)
+    if risk_level == '낮음':
+        stop_multiplier = 1.5
+    elif risk_level == '보통':
+        stop_multiplier = 2.0
+    else:
+        stop_multiplier = 2.5
+
+    stop_loss_pct = max(1.5, min(atr_pct * stop_multiplier * 0.5, 8.0))
+
+    # 지지선 고려 (지지선이 가까우면 그 아래로 손절)
+    support_dist_pct = ((current_price - support) / current_price) * 100
+    if 0 < support_dist_pct < stop_loss_pct:
+        stop_loss_pct = support_dist_pct + 0.5  # 지지선 살짝 아래
+
+    stop_loss_price = round(current_price * (1 - stop_loss_pct / 100), 2)
+
+    # === 보유 기간 추천 ===
+    if prob_1d >= 65 and final_score >= 70:
+        hold_period = "당일~2일"
+        strategy = "단타"
+    elif prob_5d >= 65 and final_score >= 60:
+        hold_period = "3~5일"
+        strategy = "스윙"
+    elif prob_5d >= 55:
+        hold_period = "1~2주"
+        strategy = "단기 보유"
+    else:
+        hold_period = "1주 이내"
+        strategy = "관망 후 진입"
+
+    # === 리스크/리워드 비율 ===
+    reward = target_pct_5d
+    risk = stop_loss_pct
+    rr_ratio = round(reward / risk, 2) if risk > 0 else 0
+
+    # === 매수 타이밍 ===
+    if final_score >= 80:
+        timing = "즉시 매수"
+    elif final_score >= 65:
+        timing = "시가 확인 후 매수"
+    elif final_score >= 50:
+        timing = "눌림목 대기 후 매수"
+    else:
+        timing = "추가 확인 필요"
+
+    return {
+        'entry_price': entry_price,
+        'limit_price': limit_price,
+        'target_price_1d': target_price_1d,
+        'target_price_5d': target_price_5d,
+        'target_pct_1d': round(target_pct_1d, 1),
+        'target_pct_5d': round(target_pct_5d, 1),
+        'stop_loss_price': stop_loss_price,
+        'stop_loss_pct': round(stop_loss_pct, 1),
+        'hold_period': hold_period,
+        'strategy': strategy,
+        'timing': timing,
+        'rr_ratio': rr_ratio,
+        'daily_volatility': round(daily_vol, 2),
+        'atr_pct': round(atr_pct, 2),
+        'analyst_target': analyst_target,
+        'support': round(support, 2),
+        'resistance': round(resistance, 2),
+    }
+
+
 def calculate_grade(score: float) -> str:
-    """점수 기반 등급"""
     if score >= 85:
         return 'S'
     elif score >= 70:
@@ -150,42 +270,26 @@ def calculate_grade(score: float) -> str:
 
 
 def estimate_probability(final_score: float, ml_result: dict, horizon: str) -> float:
-    """상승 확률 추정"""
     ml_prob = ml_result.get('details', {}).get(f'ML_{horizon}_prob', 50)
-
-    # 최종 점수와 ML 확률의 가중 평균
-    # ML이 더 직접적인 확률이므로 비중 높임
     estimated = ml_prob * 0.6 + final_score * 0.4
-
-    # 범위 제한 (15% ~ 90%)
     return max(15, min(90, estimated))
 
 
 def assess_risk(scores: dict, df: pd.DataFrame = None, info: dict = None) -> str:
-    """리스크 레벨 평가"""
     risk_factors = 0
-
-    # 점수 분산이 크면 리스크 높음
     score_values = list(scores.values())
     if np.std(score_values) > 25:
         risk_factors += 1
-
-    # 펀더멘털 낮으면 리스크
     if scores.get('fundamental', 0) < 30:
         risk_factors += 1
-
-    # 변동성 체크
     if df is not None and len(df) >= 20:
         vol = df['Close'].pct_change().tail(20).std()
-        if vol > 0.05:  # 일간 변동성 5% 이상
+        if vol > 0.05:
             risk_factors += 1
-
-    # 소형주 리스크
     if info:
         mcap = info.get('marketCap', 0)
         if isinstance(mcap, (int, float)) and 0 < mcap < 1e9:
             risk_factors += 1
-
     if risk_factors >= 3:
         return '높음'
     elif risk_factors >= 2:
@@ -195,9 +299,8 @@ def assess_risk(scores: dict, df: pd.DataFrame = None, info: dict = None) -> str
 
 
 def generate_recommendation(grade: str, prob_1d: float, prob_5d: float, risk: str) -> str:
-    """추천 문구 생성"""
     if grade == 'S':
-        return '강력 매수 추천 - 다중 시그널 일치'
+        return '강력 매수 - 즉시 진입 추천'
     elif grade == 'A':
         if risk == '낮음':
             return '매수 추천 - 안정적 상승 기대'
@@ -205,22 +308,19 @@ def generate_recommendation(grade: str, prob_1d: float, prob_5d: float, risk: st
             return '매수 고려 - 상승 가능성 높으나 리스크 존재'
     elif grade == 'B':
         if prob_5d > 60:
-            return '관심 종목 - 단기 상승 가능성'
+            return '매수 고려 - 단기 상승 가능성'
         else:
-            return '관심 종목 - 추가 확인 필요'
+            return '관심 종목 - 눌림목 매수 대기'
     elif grade == 'C':
-        return '중립 - 명확한 방향성 부재'
+        return '관망 - 명확한 방향성 부재'
     elif grade == 'D':
-        return '보류 - 하락 리스크 존재'
+        return '매수 보류 - 하락 리스크'
     else:
-        return '매수 비추천 - 부정적 시그널 다수'
+        return '매수 금지 - 부정적 시그널'
 
 
 def rank_stocks(results: list) -> list:
-    """종목들을 최종 점수로 순위화"""
     sorted_results = sorted(results, key=lambda x: x['final_score'], reverse=True)
-
     for i, r in enumerate(sorted_results):
         r['rank'] = i + 1
-
     return sorted_results

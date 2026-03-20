@@ -12,12 +12,20 @@ import json
 from datetime import datetime
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, BackgroundTasks, WebSocket, WebSocketDisconnect
+import hashlib
+import secrets
+import os
+
+from fastapi import FastAPI, BackgroundTasks, WebSocket, WebSocketDisconnect, Request, Cookie
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from engine import analyze_single_stock, run_full_analysis, get_latest_results
+
+# 인증 설정
+APP_PASSWORD_HASH = hashlib.sha256("aa758800".encode()).hexdigest()
+active_tokens = set()
 
 # 분석 상태 관리
 analysis_state = {
@@ -83,9 +91,38 @@ app.add_middleware(
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
 
+def verify_token(request: Request) -> bool:
+    """토큰 검증"""
+    token = request.cookies.get("auth_token") or request.headers.get("X-Auth-Token")
+    return token in active_tokens
+
+
 @app.get("/")
-async def root():
-    return FileResponse(FRONTEND_DIR / "index.html")
+async def root(request: Request):
+    token = request.cookies.get("auth_token")
+    if token in active_tokens:
+        return FileResponse(FRONTEND_DIR / "index.html")
+    return FileResponse(FRONTEND_DIR / "login.html")
+
+
+@app.post("/api/login")
+async def login(request: Request):
+    try:
+        body = await request.json()
+        if isinstance(body, str):
+            import json as _json
+            body = _json.loads(body)
+        pw = body.get("password", "")
+    except Exception:
+        return JSONResponse(status_code=400, content={"message": "잘못된 요청"})
+    pw_hash = hashlib.sha256(pw.encode()).hexdigest()
+    if pw_hash == APP_PASSWORD_HASH:
+        token = secrets.token_hex(32)
+        active_tokens.add(token)
+        response = JSONResponse({"status": "ok"})
+        response.set_cookie("auth_token", token, max_age=86400 * 30, httponly=True, samesite="lax")
+        return response
+    return JSONResponse(status_code=401, content={"message": "비밀번호가 틀렸습니다."})
 
 
 @app.get("/manifest.json")
@@ -98,14 +135,18 @@ async def service_worker():
     return FileResponse(FRONTEND_DIR / "sw.js", media_type="application/javascript")
 
 
-# API 라우트
+# API 라우트 (인증 필요)
 @app.get("/api/status")
-async def get_status():
+async def get_status(request: Request):
+    if not verify_token(request):
+        return JSONResponse(status_code=401, content={"message": "인증 필요"})
     return analysis_state
 
 
 @app.get("/api/results")
-async def get_results():
+async def get_results(request: Request):
+    if not verify_token(request):
+        return JSONResponse(status_code=401, content={"message": "인증 필요"})
     results = get_latest_results()
     if results:
         return results
@@ -116,7 +157,10 @@ async def get_results():
 
 
 @app.post("/api/analyze")
-async def start_analysis(background_tasks: BackgroundTasks):
+async def start_analysis(request: Request, background_tasks: BackgroundTasks):
+    if not verify_token(request):
+        return JSONResponse(status_code=401, content={"message": "인증 필요"})
+
     if analysis_state['status'] == 'running':
         return {"message": "분석이 이미 진행 중입니다.", "status": "running"}
 
@@ -128,6 +172,7 @@ async def start_analysis(background_tasks: BackgroundTasks):
         try:
             result = run_full_analysis(
                 max_stocks=100,
+                min_score=0,
                 top_n=20,
                 workers=4,
                 progress_callback=progress_callback,
@@ -144,8 +189,10 @@ async def start_analysis(background_tasks: BackgroundTasks):
 
 
 @app.get("/api/stock/{ticker}")
-async def get_stock_detail(ticker: str):
+async def get_stock_detail(request: Request, ticker: str):
     """개별 종목 상세 분석"""
+    if not verify_token(request):
+        return JSONResponse(status_code=401, content={"message": "인증 필요"})
     result = analyze_single_stock(ticker.upper())
     if result:
         return result

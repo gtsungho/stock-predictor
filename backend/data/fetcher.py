@@ -79,14 +79,14 @@ def get_fallback_stocks() -> list:
 
 def fetch_stock_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
     """개별 종목 데이터 가져오기"""
-    cache_file = CACHE_DIR / f"{ticker}_{period}.parquet"
+    cache_file = CACHE_DIR / f"{ticker}_{period}.csv"
 
     # 캐시가 4시간 이내면 재사용 (장중에는 더 자주 갱신 가능)
     if cache_file.exists():
         mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
         if datetime.now() - mtime < timedelta(hours=4):
             try:
-                return pd.read_parquet(cache_file)
+                return pd.read_csv(cache_file, index_col=0, parse_dates=True)
             except Exception:
                 pass
 
@@ -98,7 +98,7 @@ def fetch_stock_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
 
         df.index = pd.to_datetime(df.index)
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-        df.to_parquet(cache_file)
+        df.to_csv(cache_file)
         return df
     except Exception as e:
         print(f"{ticker} 데이터 수집 실패: {e}")
