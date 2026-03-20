@@ -8,6 +8,7 @@ import numpy as np
 import json
 import os
 import time
+import random
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -19,11 +20,10 @@ CACHE_DIR.mkdir(exist_ok=True)
 STOCK_LIST_URL = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
 
 
-def get_stock_list() -> list:
-    """NASDAQ + AMEX 종목 리스트를 가져옴"""
-    cache_file = CACHE_DIR / "stock_list.json"
+def _fetch_dynamic_tickers() -> list:
+    """GitHub에서 전체 미국 종목 리스트 다운로드 (캐시 1일)"""
+    cache_file = CACHE_DIR / "all_tickers.json"
 
-    # 캐시가 1일 이내면 재사용
     if cache_file.exists():
         mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
         if datetime.now() - mtime < timedelta(days=1):
@@ -35,7 +35,6 @@ def get_stock_list() -> list:
         resp = requests.get(STOCK_LIST_URL, timeout=10)
         if resp.status_code == 200:
             tickers = [t.strip() for t in resp.text.strip().split('\n') if t.strip()]
-            # 특수문자 포함 종목 제외 (우선주 등)
             tickers = [t for t in tickers if t.isalpha() and len(t) <= 5]
             with open(cache_file, 'w') as f:
                 json.dump(tickers, f)
@@ -43,8 +42,29 @@ def get_stock_list() -> list:
     except Exception as e:
         print(f"종목 리스트 다운로드 실패: {e}")
 
-    # 폴백: 주요 종목 하드코딩
-    return get_fallback_stocks()
+    return []
+
+
+def get_stock_list(target_count: int = 150) -> list:
+    """핵심 우량주 + 동적 랜덤 종목을 합쳐서 반환 (매일 다른 조합)"""
+    # 1. 핵심 우량주 (항상 포함)
+    core = get_fallback_stocks()
+
+    # 2. 동적 리스트에서 추가 종목 랜덤 샘플링
+    dynamic = _fetch_dynamic_tickers()
+    if dynamic:
+        core_set = set(core)
+        extra_pool = [t for t in dynamic if t not in core_set]
+        need = max(0, target_count - len(core))
+        if extra_pool and need > 0:
+            random.seed(datetime.now().strftime('%Y%m%d'))  # 날짜별 시드 (같은 날은 동일 결과)
+            extra = random.sample(extra_pool, min(need, len(extra_pool)))
+            core = core + extra
+            print(f"종목 리스트: 우량주 {len(core) - len(extra)}개 + 랜덤 {len(extra)}개 = {len(core)}개")
+    else:
+        print(f"종목 리스트: 우량주 {len(core)}개 (동적 리스트 사용 불가)")
+
+    return core
 
 
 def get_fallback_stocks() -> list:
@@ -66,8 +86,16 @@ def get_fallback_stocks() -> list:
         "COIN", "SOFI", "HOOD", "AFRM", "UPST", "LC",
         # 에너지/소재
         "FSLR", "ENPH", "SEDG", "RUN",
-        # AMEX 주요 종목
+        # AMEX ETF
         "SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UVXY",
+        # AMEX 개별 종목
+        "BTG", "VALE", "SVM", "GOLD", "HL", "NGD", "AG", "FSM", "EXK", "MUX",
+        "ABEV", "PBR", "ERJ", "UGP", "BSAC", "SBS", "CIG", "SID", "GGB", "CBD",
+        "LUMN", "CRON", "TLRY", "ACB", "SNDL", "OGI", "CGC", "HEXO",
+        "NAK", "GATO", "USAS", "ASA", "SILV", "MAG", "PAAS",
+        "NMM", "EGLE", "GOGL", "SBLK", "SB", "GNK", "DSX",
+        # AMEX 에너지/자원
+        "BATL", "EONR", "TPET",
         # 중소형 성장주
         "PLTR", "NET", "DDOG", "SNOW", "CRWD", "ZS", "MDB", "SHOP", "TTD", "RBLX",
         "U", "PATH", "CFLT", "DOCN", "GTLB", "IONQ", "RGTI", "QUBT",

@@ -28,6 +28,15 @@ from scoring.ensemble import calculate_ensemble_score, rank_stocks
 RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
+GRADE_ORDER = {'S': 0, 'A': 1, 'B': 2, 'C': 3, 'D': 4, 'F': 5}
+
+
+def _sort_key(stock):
+    """등급 우선 → 상승 확률순 정렬 키"""
+    grade = GRADE_ORDER.get(stock.get('grade', 'F'), 5)
+    prob = max(stock.get('rise_probability_1d', 0), stock.get('rise_probability_5d', 0))
+    return (grade, -prob)
+
 
 def filter_by_probability(stocks: list, start_threshold: float = 70.0, step: float = 2.0, min_threshold: float = 50.0) -> tuple:
     """
@@ -46,20 +55,13 @@ def filter_by_probability(stocks: list, start_threshold: float = 70.0, step: flo
             or s.get('rise_probability_5d', 0) >= threshold
         ]
         if filtered:
-            # 확률 높은 순 정렬
-            filtered.sort(
-                key=lambda x: max(x.get('rise_probability_1d', 0), x.get('rise_probability_5d', 0)),
-                reverse=True
-            )
+            # 등급 우선 → 확률 높은 순 정렬
+            filtered.sort(key=_sort_key)
             return filtered, threshold
         threshold -= step
 
     # 최소 임계값에서도 없으면 전체 중 상위 5개
-    stocks_sorted = sorted(
-        stocks,
-        key=lambda x: max(x.get('rise_probability_1d', 0), x.get('rise_probability_5d', 0)),
-        reverse=True
-    )
+    stocks_sorted = sorted(stocks, key=_sort_key)
     actual_threshold = max(
         stocks_sorted[0].get('rise_probability_1d', 0),
         stocks_sorted[0].get('rise_probability_5d', 0)
@@ -103,11 +105,13 @@ def _is_low_memory_env() -> bool:
 
 
 def analyze_batch(tickers: list, workers: int = 4, progress_callback=None,
-                  progress_start: int = 0, progress_end: int = 100) -> list:
+                  progress_start: int = 0, progress_end: int = 100,
+                  batch_label: str = '') -> list:
     """종목 배치 분석 (서버 환경에서는 순차 처리로 메모리 절약)"""
     results = []
     completed = 0
     total = len(tickers)
+    prefix = f'[{batch_label}] ' if batch_label else ''
 
     # 저메모리 환경: 순차 처리 + GC
     if _is_low_memory_env():
@@ -124,7 +128,7 @@ def analyze_batch(tickers: list, workers: int = 4, progress_callback=None,
                 gc.collect()
                 if progress_callback:
                     pct = progress_start + int((completed / total) * (progress_end - progress_start))
-                    progress_callback('analyzing', f'{completed}/{total} 분석 완료', pct)
+                    progress_callback('analyzing', f'{prefix}{completed}/{total} 분석 완료', pct)
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(analyze_single_stock, t): t for t in tickers}
@@ -140,7 +144,7 @@ def analyze_batch(tickers: list, workers: int = 4, progress_callback=None,
 
                 if completed % 10 == 0 and progress_callback:
                     pct = progress_start + int((completed / total) * (progress_end - progress_start))
-                    progress_callback('analyzing', f'{completed}/{total} 분석 완료', pct)
+                    progress_callback('analyzing', f'{prefix}{completed}/{total} 분석 완료', pct)
 
     return results
 
@@ -166,7 +170,7 @@ def run_full_analysis(
     if progress_callback:
         progress_callback('loading', '우량주 리스트 로딩 중...', 0)
 
-    bluechip_tickers = get_fallback_stocks()[:max_stocks]
+    bluechip_tickers = get_stock_list()[:max_stocks]
     print(f"우량주 {len(bluechip_tickers)}개 분석 시작 ({BATCH_SIZE}개씩 배치)")
 
     # === 2단계: 우량주 배치 분석 (50개씩 나눠서) ===
@@ -187,6 +191,7 @@ def run_full_analysis(
             batch, workers=workers,
             progress_callback=progress_callback,
             progress_start=p_start, progress_end=p_end,
+            batch_label=f'{batch_num}/{total_batches}회차',
         )
         bluechip_results.extend(batch_results)
         print(f"  배치 {batch_num}/{total_batches} 완료: {len(batch_results)}개 성공")
