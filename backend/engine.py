@@ -166,12 +166,15 @@ def run_full_analysis(
     start_time = time.time()
     BATCH_SIZE = 50
 
-    # === 1단계: 우량주 리스트 ===
+    # === 1단계: 종목 리스트 수집 ===
     if progress_callback:
-        progress_callback('loading', '우량주 리스트 로딩 중...', 0)
+        progress_callback('loading', '종목 리스트 수집 중...', 0)
 
-    bluechip_tickers = get_stock_list()[:max_stocks]
-    print(f"우량주 {len(bluechip_tickers)}개 분석 시작 ({BATCH_SIZE}개씩 배치)")
+    stock_list_info = get_stock_list(target_count=max_stocks)
+    bluechip_tickers = stock_list_info['tickers']
+    api_count = stock_list_info['api_count']
+    fallback_count = stock_list_info['fallback_count']
+    print(f"종목 {len(bluechip_tickers)}개 분석 시작 (API {api_count}개 + 고정 {fallback_count}개, {BATCH_SIZE}개씩 배치)")
 
     # === 2단계: 우량주 배치 분석 (50개씩 나눠서) ===
     bluechip_results = []
@@ -275,6 +278,8 @@ def run_full_analysis(
     output = {
         'timestamp': datetime.now().isoformat(),
         'analyzed_count': len(all_results_map),
+        'api_count': api_count,
+        'fallback_count': fallback_count,
         'elapsed_seconds': round(elapsed, 1),
         'usd_krw': usd_krw,
         'tabs': {

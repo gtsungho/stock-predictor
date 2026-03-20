@@ -100,6 +100,9 @@ async function loadResults() {
         document.getElementById('summary-section').classList.remove('hidden');
         document.getElementById('tab-section').classList.remove('hidden');
         document.getElementById('total-analyzed').textContent = data.analyzed_count || '-';
+        const apiCnt = data.api_count || 0;
+        const fbCnt = data.fallback_count || 0;
+        document.getElementById('stock-source').textContent = apiCnt > 0 ? `API ${apiCnt} + 고정 ${fbCnt}` : `고정 ${fbCnt}`;
         document.getElementById('elapsed-time').textContent = data.elapsed_seconds ? formatElapsed(data.elapsed_seconds) : '-';
         if (data.timestamp) {
             const d = new Date(data.timestamp);

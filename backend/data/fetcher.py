@@ -20,51 +20,102 @@ CACHE_DIR.mkdir(exist_ok=True)
 STOCK_LIST_URL = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
 
 
-def _fetch_dynamic_tickers() -> list:
-    """GitHub에서 전체 미국 종목 리스트 다운로드 (캐시 1일)"""
-    cache_file = CACHE_DIR / "all_tickers.json"
+def _fetch_screener_tickers() -> list:
+    """Yahoo Finance 스크리너로 활발한 종목 자동 추출 (캐시 4시간)"""
+    cache_file = CACHE_DIR / "screener_tickers.json"
 
     if cache_file.exists():
         mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
-        if datetime.now() - mtime < timedelta(days=1):
+        if datetime.now() - mtime < timedelta(hours=4):
             with open(cache_file) as f:
                 return json.load(f)
 
+    tickers = []
     try:
         import requests
-        resp = requests.get(STOCK_LIST_URL, timeout=10)
-        if resp.status_code == 200:
-            tickers = [t.strip() for t in resp.text.strip().split('\n') if t.strip()]
-            tickers = [t for t in tickers if t.isalpha() and len(t) <= 5]
+        headers = {'User-Agent': 'Mozilla/5.0'}
+
+        # Yahoo Finance 스크리너 API
+        screeners = [
+            'most_actives',     # 거래량 상위
+            'day_gainers',      # 당일 급등
+            'day_losers',       # 당일 급락 (반등 기회)
+            'undervalued_large_caps',  # 저평가 대형주
+        ]
+
+        for screener in screeners:
+            try:
+                url = f'https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds={screener}&count=50'
+                resp = requests.get(url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    quotes = data.get('finance', {}).get('result', [{}])[0].get('quotes', [])
+                    for q in quotes:
+                        symbol = q.get('symbol', '')
+                        # 미국 주식만 (., - 없는 일반 티커)
+                        if symbol and symbol.isalpha() and len(symbol) <= 5:
+                            tickers.append(symbol)
+            except Exception:
+                continue
+
+        # 중복 제거 (순서 유지)
+        seen = set()
+        unique = []
+        for t in tickers:
+            if t not in seen:
+                seen.add(t)
+                unique.append(t)
+        tickers = unique
+
+        if tickers:
             with open(cache_file, 'w') as f:
                 json.dump(tickers, f)
-            return tickers
+            print(f"스크리너: {len(tickers)}개 동적 종목 수집")
+
     except Exception as e:
-        print(f"종목 리스트 다운로드 실패: {e}")
+        print(f"스크리너 실패: {e}")
 
-    return []
+    return tickers
 
 
-def get_stock_list(target_count: int = 150) -> list:
-    """핵심 우량주 + 동적 랜덤 종목을 합쳐서 반환 (매일 다른 조합)"""
-    # 1. 핵심 우량주 (항상 포함)
-    core = get_fallback_stocks()
+def get_stock_list(target_count: int = 150) -> dict:
+    """동적 스크리너 + 하드코딩 우량주를 합쳐서 반환
+    Returns: {'tickers': [...], 'api_count': int, 'fallback_count': int}
+    """
+    # 1. 동적 스크리너 (Yahoo Finance)
+    api_tickers = _fetch_screener_tickers()
 
-    # 2. 동적 리스트에서 추가 종목 랜덤 샘플링
-    dynamic = _fetch_dynamic_tickers()
-    if dynamic:
-        core_set = set(core)
-        extra_pool = [t for t in dynamic if t not in core_set]
-        need = max(0, target_count - len(core))
-        if extra_pool and need > 0:
-            random.seed(datetime.now().strftime('%Y%m%d'))  # 날짜별 시드 (같은 날은 동일 결과)
-            extra = random.sample(extra_pool, min(need, len(extra_pool)))
-            core = core + extra
-            print(f"종목 리스트: 우량주 {len(core) - len(extra)}개 + 랜덤 {len(extra)}개 = {len(core)}개")
-    else:
-        print(f"종목 리스트: 우량주 {len(core)}개 (동적 리스트 사용 불가)")
+    # 2. 하드코딩 우량주
+    fallback = get_fallback_stocks()
 
-    return core
+    # 3. 합치기 (동적 우선, 중복 제거)
+    seen = set()
+    merged = []
+
+    # API 종목 먼저
+    for t in api_tickers:
+        if t not in seen:
+            seen.add(t)
+            merged.append(t)
+    api_count = len(merged)
+
+    # 하드코딩 종목 추가
+    for t in fallback:
+        if t not in seen:
+            seen.add(t)
+            merged.append(t)
+    fallback_count = len(merged) - api_count
+
+    # target_count만큼 자르기
+    merged = merged[:target_count]
+
+    print(f"종목 리스트: API {api_count}개 + 고정 {fallback_count}개 = 총 {len(merged)}개")
+
+    return {
+        'tickers': merged,
+        'api_count': min(api_count, len(merged)),
+        'fallback_count': len(merged) - min(api_count, len(merged)),
+    }
 
 
 def get_fallback_stocks() -> list:
