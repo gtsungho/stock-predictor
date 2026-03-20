@@ -1,0 +1,8 @@
+python/
+backend/cache/
+backend/models/
+backend/results/
+backend/venv/
+__pycache__/
+*.pyc
+*.parquet
