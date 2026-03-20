@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import time
 import json
+import gc
+import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -94,28 +96,51 @@ def analyze_single_stock(ticker: str, period: str = "6mo") -> dict:
         return None
 
 
+def _is_low_memory_env() -> bool:
+    """Render Free 등 저메모리 환경 감지"""
+    # Render는 PORT 환경변수를 자동 설정
+    return os.environ.get("RENDER") == "true" or os.environ.get("PORT") is not None
+
+
 def analyze_batch(tickers: list, workers: int = 4, progress_callback=None,
                   progress_start: int = 0, progress_end: int = 100) -> list:
-    """종목 배치 분석"""
+    """종목 배치 분석 (서버 환경에서는 순차 처리로 메모리 절약)"""
     results = []
     completed = 0
     total = len(tickers)
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(analyze_single_stock, t): t for t in tickers}
-
-        for future in as_completed(futures):
+    # 저메모리 환경: 순차 처리 + GC
+    if _is_low_memory_env():
+        for t in tickers:
             completed += 1
             try:
-                result = future.result()
+                result = analyze_single_stock(t)
                 if result:
                     results.append(result)
             except Exception:
                 pass
 
-            if completed % 10 == 0 and progress_callback:
-                pct = progress_start + int((completed / total) * (progress_end - progress_start))
-                progress_callback('analyzing', f'{completed}/{total} 분석 완료', pct)
+            if completed % 5 == 0:
+                gc.collect()
+                if progress_callback:
+                    pct = progress_start + int((completed / total) * (progress_end - progress_start))
+                    progress_callback('analyzing', f'{completed}/{total} 분석 완료', pct)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(analyze_single_stock, t): t for t in tickers}
+
+            for future in as_completed(futures):
+                completed += 1
+                try:
+                    result = future.result()
+                    if result:
+                        results.append(result)
+                except Exception:
+                    pass
+
+                if completed % 10 == 0 and progress_callback:
+                    pct = progress_start + int((completed / total) * (progress_end - progress_start))
+                    progress_callback('analyzing', f'{completed}/{total} 분석 완료', pct)
 
     return results
 
@@ -136,6 +161,13 @@ def run_full_analysis(
     """
     start_time = time.time()
 
+    # 서버 환경에서는 분석 수 축소 (메모리 제한)
+    low_mem = _is_low_memory_env()
+    if low_mem:
+        max_stocks = min(max_stocks, 50)
+        workers = 1
+        print(f"[서버 모드] max_stocks={max_stocks}, 순차 처리")
+
     # === 1단계: 우량주 리스트 ===
     if progress_callback:
         progress_callback('loading', '우량주 리스트 로딩 중...', 0)
@@ -153,6 +185,7 @@ def run_full_analysis(
         progress_start=5, progress_end=50,
     )
     print(f"  우량주 분석 완료: {len(bluechip_results)}개")
+    gc.collect()
 
     # === 3단계: 급등주 스크리닝 ===
     if progress_callback:
@@ -175,6 +208,7 @@ def run_full_analysis(
     gainers = gainers[:top_n]
 
     print(f"  급등주: {len(gainers)}개")
+    gc.collect()
 
     # === 4단계: 거래량 폭발 스크리닝 ===
     if progress_callback:

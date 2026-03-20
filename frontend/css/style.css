@@ -376,34 +376,43 @@ body {
 
 .trade-row {
     display: flex;
+    flex-direction: column;
     gap: 8px;
 }
 
 .trade-item {
-    flex: 1;
-    text-align: center;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+.trade-item:last-child {
+    border-bottom: none;
 }
 
 .trade-label {
-    display: block;
-    font-size: 9px;
+    font-size: 11px;
     color: var(--text-secondary);
-    margin-bottom: 2px;
+    width: 68px;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .trade-value {
-    font-size: 14px;
+    font-size: 18px;
     font-weight: 700;
 }
 
 .trade-pct {
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
+    margin-left: auto;
 }
 
 .trade-krw {
-    display: block;
-    font-size: 10px;
+    font-size: 14px;
     color: var(--text-secondary);
 }
 
@@ -483,8 +492,9 @@ body {
 }
 
 .price-change {
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
+    margin-left: auto;
 }
 
 .price-change.up { color: var(--green); }
@@ -526,12 +536,12 @@ body {
 }
 
 .td-value {
-    font-size: 16px;
+    font-size: 18px;
     font-weight: 700;
 }
 
 .td-sub {
-    font-size: 10px;
+    font-size: 12px;
     margin-top: 2px;
 }
 

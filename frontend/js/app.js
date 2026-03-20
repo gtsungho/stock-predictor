@@ -5,9 +5,13 @@ let currentTab = 'top20';
 let ws = null;
 let usdKrw = 0; // USD/KRW 환율
 
+function toKrw(usd) {
+    if (!usdKrw || !usd) return '';
+    return `₩${Math.round(usd * usdKrw).toLocaleString()}`;
+}
 function krw(usd) {
     if (!usdKrw || !usd) return '';
-    return `(₩${Math.round(usd * usdKrw).toLocaleString()})`;
+    return `($${(+usd).toFixed(2)})`;
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -96,7 +100,7 @@ async function loadResults() {
         document.getElementById('summary-section').classList.remove('hidden');
         document.getElementById('tab-section').classList.remove('hidden');
         document.getElementById('total-analyzed').textContent = data.analyzed_count || '-';
-        document.getElementById('elapsed-time').textContent = data.elapsed_seconds ? `${data.elapsed_seconds}초` : '-';
+        document.getElementById('elapsed-time').textContent = data.elapsed_seconds ? formatElapsed(data.elapsed_seconds) : '-';
         if (data.timestamp) {
             const d = new Date(data.timestamp);
             document.getElementById('last-update').textContent =
@@ -170,19 +174,19 @@ function createStockCard(stock, index) {
             <div class="trade-row">
                 <div class="trade-item">
                     <span class="trade-label">현재가</span>
-                    <span class="trade-value">$${(price.current_price || 0).toFixed(2)}</span>
+                    <span class="trade-value">${toKrw(price.current_price)}</span>
                     <span class="trade-krw">${krw(price.current_price)}</span>
                     <span class="price-change ${changeClass}">${changeSign}${(price.change_pct || 0).toFixed(2)}%</span>
                 </div>
                 <div class="trade-item target">
                     <span class="trade-label">목표가 (5일)</span>
-                    <span class="trade-value green">$${(trade.target_price_5d || 0).toFixed(2)}</span>
+                    <span class="trade-value green">${toKrw(trade.target_price_5d)}</span>
                     <span class="trade-krw">${krw(trade.target_price_5d)}</span>
                     <span class="trade-pct green">+${(trade.target_pct_5d || 0).toFixed(1)}%</span>
                 </div>
                 <div class="trade-item stop">
                     <span class="trade-label">손절가</span>
-                    <span class="trade-value red">$${(trade.stop_loss_price || 0).toFixed(2)}</span>
+                    <span class="trade-value red">${toKrw(trade.stop_loss_price)}</span>
                     <span class="trade-krw">${krw(trade.stop_loss_price)}</span>
                     <span class="trade-pct red">-${(trade.stop_loss_pct || 0).toFixed(1)}%</span>
                 </div>
@@ -278,25 +282,25 @@ function renderDetail(stock) {
             <div class="trade-detail-row main-row">
                 <div class="td-item">
                     <div class="td-label">매수가 (진입)</div>
-                    <div class="td-value">$${trade.entry_price || '-'}</div>
+                    <div class="td-value">${trade.entry_price ? toKrw(trade.entry_price) : '-'}</div>
                     <div class="td-sub">${krw(trade.entry_price)}</div>
                 </div>
                 <div class="td-item">
                     <div class="td-label">지정가 매수</div>
-                    <div class="td-value dim">$${trade.limit_price || '-'}</div>
+                    <div class="td-value dim">${trade.limit_price ? toKrw(trade.limit_price) : '-'}</div>
                     <div class="td-sub">${krw(trade.limit_price)}</div>
                 </div>
             </div>
             <div class="trade-detail-row">
                 <div class="td-item green-bg">
                     <div class="td-label">목표가 (당일)</div>
-                    <div class="td-value green">$${trade.target_price_1d || '-'}</div>
+                    <div class="td-value green">${trade.target_price_1d ? toKrw(trade.target_price_1d) : '-'}</div>
                     <div class="td-sub green">${krw(trade.target_price_1d)}</div>
                     <div class="td-sub green">+${(trade.target_pct_1d || 0).toFixed(1)}% 도달시 매도</div>
                 </div>
                 <div class="td-item green-bg">
                     <div class="td-label">목표가 (5일)</div>
-                    <div class="td-value green">$${trade.target_price_5d || '-'}</div>
+                    <div class="td-value green">${trade.target_price_5d ? toKrw(trade.target_price_5d) : '-'}</div>
                     <div class="td-sub green">${krw(trade.target_price_5d)}</div>
                     <div class="td-sub green">+${(trade.target_pct_5d || 0).toFixed(1)}% 도달시 매도</div>
                 </div>
@@ -304,7 +308,7 @@ function renderDetail(stock) {
             <div class="trade-detail-row">
                 <div class="td-item red-bg">
                     <div class="td-label">손절가</div>
-                    <div class="td-value red">$${trade.stop_loss_price || '-'}</div>
+                    <div class="td-value red">${trade.stop_loss_price ? toKrw(trade.stop_loss_price) : '-'}</div>
                     <div class="td-sub red">${krw(trade.stop_loss_price)}</div>
                     <div class="td-sub red">-${(trade.stop_loss_pct || 0).toFixed(1)}% 하락시 매도</div>
                 </div>
@@ -324,9 +328,9 @@ function renderDetail(stock) {
             <div class="guide-item"><span class="guide-label">보유 기간</span><span class="guide-value">${trade.hold_period || '-'}</span></div>
             <div class="guide-item"><span class="guide-label">매수 타이밍</span><span class="guide-value accent">${trade.timing || '-'}</span></div>
             <div class="guide-item"><span class="guide-label">일일 변동성</span><span class="guide-value">${(trade.daily_volatility || 0).toFixed(2)}%</span></div>
-            <div class="guide-item"><span class="guide-label">지지선</span><span class="guide-value">$${trade.support || '-'}</span></div>
-            <div class="guide-item"><span class="guide-label">저항선</span><span class="guide-value">$${trade.resistance || '-'}</span></div>
-            ${trade.analyst_target ? `<div class="guide-item"><span class="guide-label">애널리스트 목표가</span><span class="guide-value green">$${trade.analyst_target} ${krw(trade.analyst_target)}</span></div>` : ''}
+            <div class="guide-item"><span class="guide-label">지지선</span><span class="guide-value">${trade.support ? toKrw(trade.support) + ' ' + krw(trade.support) : '-'}</span></div>
+            <div class="guide-item"><span class="guide-label">저항선</span><span class="guide-value">${trade.resistance ? toKrw(trade.resistance) + ' ' + krw(trade.resistance) : '-'}</span></div>
+            ${trade.analyst_target ? `<div class="guide-item"><span class="guide-label">애널리스트 목표가</span><span class="guide-value green">${toKrw(trade.analyst_target)} ${krw(trade.analyst_target)}</span></div>` : ''}
             ${renderMarketEvents(stock)}
         </div>
     </div>
@@ -445,6 +449,13 @@ async function searchStock() {
     }
 
     input.value = '';
+}
+
+function formatElapsed(seconds) {
+    if (seconds < 60) return `${seconds}초`;
+    const m = Math.floor(seconds / 60);
+    const s = Math.round(seconds % 60);
+    return s > 0 ? `${m}분 ${s}초` : `${m}분`;
 }
 
 function formatLabel(key) {

@@ -6,3 +6,5 @@ services:
     envVars:
       - key: PORT
         value: "8000"
+      - key: RENDER
+        value: "true"
