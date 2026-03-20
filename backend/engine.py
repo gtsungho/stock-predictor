@@ -146,7 +146,7 @@ def analyze_batch(tickers: list, workers: int = 4, progress_callback=None,
 
 
 def run_full_analysis(
-    max_stocks: int = 100,
+    max_stocks: int = 150,
     min_score: float = 0,
     top_n: int = 20,
     workers: int = 4,
@@ -160,32 +160,39 @@ def run_full_analysis(
     4. 종합 TOP 20 (전체 합산)
     """
     start_time = time.time()
-
-    # 서버 환경에서는 분석 수 축소 (메모리 제한)
-    low_mem = _is_low_memory_env()
-    if low_mem:
-        max_stocks = min(max_stocks, 50)
-        workers = 1
-        print(f"[서버 모드] max_stocks={max_stocks}, 순차 처리")
+    BATCH_SIZE = 50
 
     # === 1단계: 우량주 리스트 ===
     if progress_callback:
         progress_callback('loading', '우량주 리스트 로딩 중...', 0)
 
     bluechip_tickers = get_fallback_stocks()[:max_stocks]
-    print(f"우량주 {len(bluechip_tickers)}개 분석 시작")
+    print(f"우량주 {len(bluechip_tickers)}개 분석 시작 ({BATCH_SIZE}개씩 배치)")
 
-    # === 2단계: 우량주 분석 ===
-    if progress_callback:
-        progress_callback('analyzing', f'우량주 {len(bluechip_tickers)}개 분석 중...', 5)
+    # === 2단계: 우량주 배치 분석 (50개씩 나눠서) ===
+    bluechip_results = []
+    batches = [bluechip_tickers[i:i+BATCH_SIZE] for i in range(0, len(bluechip_tickers), BATCH_SIZE)]
+    total_batches = len(batches)
 
-    bluechip_results = analyze_batch(
-        bluechip_tickers, workers=workers,
-        progress_callback=progress_callback,
-        progress_start=5, progress_end=50,
-    )
+    for batch_idx, batch in enumerate(batches):
+        batch_num = batch_idx + 1
+        # 진행률: 5% ~ 50% 구간을 배치별로 분배
+        p_start = 5 + int((batch_idx / total_batches) * 45)
+        p_end = 5 + int(((batch_idx + 1) / total_batches) * 45)
+
+        if progress_callback:
+            progress_callback('analyzing', f'우량주 배치 {batch_num}/{total_batches} ({len(batch)}개) 분석 중...', p_start)
+
+        batch_results = analyze_batch(
+            batch, workers=workers,
+            progress_callback=progress_callback,
+            progress_start=p_start, progress_end=p_end,
+        )
+        bluechip_results.extend(batch_results)
+        print(f"  배치 {batch_num}/{total_batches} 완료: {len(batch_results)}개 성공")
+        gc.collect()
+
     print(f"  우량주 분석 완료: {len(bluechip_results)}개")
-    gc.collect()
 
     # === 3단계: 급등주 스크리닝 ===
     if progress_callback:

@@ -185,7 +185,7 @@ async def start_analysis(request: Request, background_tasks: BackgroundTasks):
     def run_analysis():
         try:
             result = run_full_analysis(
-                max_stocks=100,
+                max_stocks=150,
                 min_score=0,
                 top_n=20,
                 workers=4,
